@@ -1,0 +1,22 @@
+# Bronze layer — Reddit + NewsAPI ingestion
+praw==7.8.1
+requests==2.32.3
+
+# HDFS client (used by scripts/upload_to_hdfs.py)
+hdfs[kerberos]==2.7.3
+
+# Silver + Gold — Spark ETL
+pyspark==3.5.1
+
+# Gold — sentiment
+vaderSentiment==3.3.2
+
+# Gold — Postgres write
+psycopg2-binary==2.9.9
+
+# Cross-layer — metrics
+prometheus-client==0.20.0
+
+# Tests
+pytest==8.3.2
+pytest-mock==3.14.0

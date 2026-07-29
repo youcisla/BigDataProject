@@ -65,10 +65,10 @@ Les flèches pleines portent les données : Sources → Bronze HDFS → Spark Si
 
 | Exigence (docx) | Couverture | Localisation |
 |---|---|---|
-| Bronze / Silver / Gold | OK | `jobs/bronze_ingest.py`, `jobs/silver_transform.py`, `jobs/gold_kpis.py` |
-| 5 Go+ données mixtes | OK | Dump Reddit bulk (Kaggle/torrent) + PRAW live + NewsAPI |
+| Bronze / Silver / Gold | OK | `scripts/fetch_reddit.py` (Bronze) + `jobs/silver_transform.py` + `jobs/gold_kpis.py` |
+| 5 Go+ données mixtes | OK | Dump Reddit bulk (Kaggle/torrent) + NewsAPI live |
 | Structuré + non structuré | OK | Métadonnées Reddit/NewsAPI + texte posts/articles |
-| Fetch automatisé via API | OK | `scripts/fetch_reddit.py` (PRAW), `scripts/fetch_newsapi.py` |
+| Fetch automatisé via API | OK | `scripts/fetch_newsapi.py` (live) + `scripts/fetch_reddit.py` (bulk loader automatisé) |
 | Spark non local | OK | Cluster Docker : 1 master + N workers (défaut 1, scalable via `--scale`) |
 | Workers logiques | OK | `docker compose up --scale spark-worker=N` |
 | Aucune configuration manuelle | OK | `.env` + YAML, aucun `.sh` |
@@ -76,8 +76,8 @@ Les flèches pleines portent les données : Sources → Bronze HDFS → Spark Si
 | Métriques par couche | OK | Bronze (records, durée), Silver (nulls, invalides, doublons exacts), Gold (lignes chargées, durée) |
 | Prometheus + métriques système | OK | `monitoring/prometheus.yml` + `cadvisor` (docker stats, remplace node-exporter) |
 | PostgreSQL pour Gold | OK | Service `postgres` dans `docker-compose.yml` |
-| HDFS | OK | Services `namenode` + `datanode` (Bitnami image) |
-| Docker Compose + Makefile | OK | `docker-compose.yml` + `docker-compose.override.yml` (laptop) + `Makefile` (up/down/ingest/transform/load/monitor/demo/test/reset) |
+| HDFS | OK | Services `namenode` + `datanode` (apache/hadoop image) |
+| Docker Compose + Makefile | OK | `docker-compose.yml` + `Makefile` (up/down/bulk/ingest-news/transform/load/monitor/demo/test/reset) |
 
 ---
 
@@ -88,23 +88,26 @@ Les flèches pleines portent les données : Sources → Bronze HDFS → Spark Si
 | Source | Type | Structuré | Non structuré | Volume visé |
 |---|---|---|---|---|
 | **Reddit bulk dump** | Archive statique (Kaggle / torrent) | id, subreddit, timestamp, score, auteur | titre + corps + commentaires | 3–5 Go (1 chargement) |
-| **Reddit live (PRAW)** | API REST | id, subreddit, timestamp, score, auteur | titre + corps + top comments | 50–200 Mo/jour |
 | **NewsAPI** | API REST | source, date, URL, auteur | titre + description (headlines) | 10–50 Mo/jour |
 
 **Total attendu : > 5 Go** (bulk + flux cumulé).
 
 ### Sources complémentaires
 
-- **Bulk Reddit.** Pushshift n'est plus accessible publiquement depuis 2023. On utilise en priorité un dump Kaggle (ex. *Reddit Comments* de borismarjanovic, ~5–10 Go compressé), ou un miroir maintenu (Arctic Shift) ou torrent (Academic Torrents, 40 000+ subreddits, plusieurs To). Chargement unique via `scripts/bulk_load_reddit.py`.
-- **PRAW.** Flux live quotidien depuis 10–15 subreddits financiers/actu (`r/wallstreetbets`, `r/stocks`, `r/CryptoCurrency`, `r/technology`, `r/news`, etc.). Couvre l'exigence « fetch automatisé via API ».
+- **Bulk Reddit.** Pushshift n'est plus accessible publiquement depuis 2023. On utilise en priorité un dump Kaggle (ex. *Reddit Comments* de borismarjanovic, ~5–10 Go compressé), ou un miroir maintenu (Arctic Shift) ou torrent (Academic Torrents, 40 000+ subreddits, plusieurs To). Chargement unique via `scripts/fetch_reddit.py --bulk-path`.
+- **NewsAPI.** Flux live quotidien depuis les catégories `business`, `technology`, `general`. Couvre l'exigence « fetch automatisé via API ».
+
+### Note sur PRAW (live Reddit)
+
+Le code PRAW (script app) a été retiré du livrable. Reddit a renforcé sa politique d'enregistrement d'applications ("Responsible Builder Policy") et bloque actuellement la création de credentials sur ce compte (échec sur le formulaire officiel et sur Devvit CLI). Le flux PRAW live était marginal (50 posts × 10 subs/jour = ~500 enregistrements/jour) par rapport au volume exigé (5 Go+), satisfait de toute façon par le dump bulk. Si la politique change, le module PRAW peut être réintégré dans `scripts/fetch_reddit.py` (les fonctions `_build_praw_client` et `fetch_live` originales sont archivées dans l'historique git).
 
 ### Justification du choix
 
 Le couple Reddit + NewsAPI coche les cases du sujet :
 
 - Mixte : métadonnées structurées + texte libre.
-- API-fetchable : PRAW (gratuit, quotas généreux) + NewsAPI (100 req/jour, suffisant pour headlines en flux continu).
-- 5 Go+ rapide : un dump Kaggle donne le volume en un `bulk_load`, le live PRAW alimente la démonstration incrémentale.
+- API-fetchable : NewsAPI (100 req/jour, suffisant pour headlines en flux continu).
+- 5 Go+ rapide : un dump Kaggle donne le volume en un chargement unique.
 - Analytiquement riche : VADER pour sentiment, agrégations temporelles, top entities. Couvre les KPIs demandés en §3 du sujet.
 
 ---
@@ -149,14 +152,14 @@ Métriques : durée de calcul, lignes agrégées, lignes écrites en base, taux 
 |---|---|---|
 | **Orchestration** | Makefile + cron | Cible Bronze → Silver → Gold via `make demo` |
 | **Traitement distribué** | Apache Spark (cluster Docker, 1 master + N workers) | Transformations Silver + Gold |
-| **Stockage brut** | HDFS (Bitnami) | Couche Bronze |
+| **Stockage brut** | HDFS (apache/hadoop) | Couche Bronze |
 | **Stockage intermédiaire** | HDFS | Couche Silver (Parquet) |
 | **Entrepôt** | PostgreSQL 16 | Couche Gold (schéma `gold`) |
 | **Monitoring** | Prometheus + cAdvisor + Grafana | Métriques cluster + per-layer ops, 1 dashboard |
-| **Conteneurisation** | Docker Compose + `docker-compose.override.yml` | Services + limites mémoire laptop |
-| **CLI** | Makefile | `make up/down/ingest/transform/load/monitor/demo/test/reset/logs` |
+| **Conteneurisation** | Docker Compose | Services + limites mémoire laptop (commentées dans `docker-compose.yml`) |
+| **CLI** | Makefile | `make up/down/bulk/ingest-news/transform/load/monitor/demo/test/reset/logs` |
 
-Aucun service cloud externe. Stack locale, reproductible, conforme au sujet. Le `docker-compose.override.yml` applique les `mem_limit` adaptés à un laptop 16 Go (10 Go alloués à Docker Desktop). En production, supprimer l'override pour libérer les contraintes.
+Aucun service cloud externe. Stack locale, reproductible, conforme au sujet. Les `mem_limit` par service sont commentés dans `docker-compose.yml` (décommentez pour un laptop 16 Go avec Docker Desktop réglé sur 10 Go). En production, laissez-les commentés : Docker alloue librement.
 
 ---
 
@@ -211,7 +214,6 @@ Le brief demande du monitoring par couche, pas un nombre de dashboards. Un dashb
 ```
 BigDataProject/
 ├── docker-compose.yml              # namenode, datanode, spark-master, spark-worker, postgres, prometheus, grafana, cadvisor
-├── docker-compose.override.yml     # mem_limit par service (mode laptop, 10 Go Docker Desktop)
 ├── Makefile                        # make up/down/ingest/transform/load/monitor/demo/test/reset/logs
 ├── .env.example                    # Template des variables d'environnement
 ├── config/
@@ -270,7 +272,7 @@ cp .env.example .env
 make up              # Démarre tout le cluster (HDFS, Spark, Postgres, Prometheus, Grafana, cAdvisor)
 make init-hdfs       # Crée les répertoires /data/bronze, /data/silver, /data/gold
 make bulk            # Bronze : charge un dump Reddit (Kaggle/torrent) → HDFS, one-shot
-make ingest          # Bronze : fetch live PRAW + NewsAPI → HDFS
+make ingest-news     # Bronze : fetch live NewsAPI headlines → HDFS
 make transform       # Silver : nettoyage + dedup SHA-256 → HDFS Parquet
 make load            # Gold : agrégations Spark → PostgreSQL
 make demo            # Tout en un : up + bulk + transform + load + URLs Grafana/Prometheus
@@ -285,7 +287,7 @@ make reset           # Down + suppression des volumes (reset complet)
 
 | Service | URL | Identifiants |
 |---|---|---|
-| Spark Master UI | http://localhost:8080 | — |
+| Spark Master UI | http://localhost:8088 | — |
 | HDFS NameNode UI | http://localhost:9870 | — |
 | PostgreSQL | `localhost:5432` | `gold` / `gold` / `gold` |
 | Prometheus | http://localhost:9090 | — |
@@ -300,7 +302,6 @@ Tout via `.env` (jamais commit) :
 
 | Variable | Usage |
 |---|---|
-| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD` | Auth PRAW (live) |
 | `NEWSAPI_KEY` | Auth NewsAPI |
 | `REDDIT_BULK_PATH` | Chemin local vers le dump Kaggle / torrent (pour `make bulk`) |
 | `HDFS_NAMENODE` | Hôte HDFS (default `namenode`) |
@@ -323,7 +324,7 @@ Tout via `.env` (jamais commit) :
 **Spark distribué (workers logiques).**
 - `docker compose up --scale spark-worker=N` scale à la demande.
 - Défaut : 1 worker (suffisant pour le volume traité, économe en RAM laptop).
-- Spark UI (`localhost:8080`) visualise le DAG et le scheduling.
+- Spark UI (`localhost:8088`) visualise le DAG et le scheduling.
 
 **cAdvisor plutôt que Node Exporter.**
 - Node Exporter ajoute un service pour des métriques CPU/RAM que `docker stats` expose déjà.
@@ -335,9 +336,10 @@ Tout via `.env` (jamais commit) :
 - Un dashboard unifié à 6-8 panels couvre cluster + Bronze + Silver + Gold + métier en une vue.
 - Plus simple à démontrer, à maintenir, à défendre à l'oral.
 
-**Choix de Reddit (bulk + live) + NewsAPI.**
+**Choix de Reddit (bulk) + NewsAPI.**
 - Bulk : un dump Kaggle (~5 Go compressé) atteint le volume exigé en un seul chargement. Pushshift est mort depuis 2023, Kaggle / Arctic Shift / Academic Torrents sont les alternatives viables.
-- Live : PRAW + NewsAPI couvrent l'exigence « fetch automatisé via API » et maintiennent le volume en croissance.
+- Live : NewsAPI couvre l'exigence « fetch automatisé via API ».
+- PRAW live a été retiré (Reddit bloque l'enregistrement d'apps sur ce compte, voir §3). Le volume reste dominé par le bulk dump.
 - Voir §3 pour le détail dataset.
 
 **VADER pour le sentiment.**
@@ -345,9 +347,9 @@ Tout via `.env` (jamais commit) :
 - Optimisé pour réseaux sociaux, moins pour news formelles. Acceptable pour ce projet, mentionné explicitement.
 
 **Stratégie mem_limit (laptop).**
-- `docker-compose.override.yml` applique des limites par service pour tenir dans 10 Go Docker Desktop.
-- Total idle ≈ 5-7 Go, processing peak ≈ 8-12 Go, marge confortable sur 16 Go physiques.
-- En production, ignorer l'override : limites levées, Spark peut consommer ce qu'il veut.
+- Les `mem_limit` par service sont commentés dans `docker-compose.yml` ; décommentez selon votre machine.
+- Total idle ≈ 5-7 Go, processing peak ≈ 8-12 Go, marge confortable sur 16 Go physiques avec Docker Desktop à 10 Go.
+- En production (32 Go+), laissez les `mem_limit` commentés : Docker alloue librement.
 
 ---
 

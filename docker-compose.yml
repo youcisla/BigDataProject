@@ -1,0 +1,193 @@
+services:
+  namenode:
+    image: apache/hadoop:3.4.1
+    container_name: namenode
+    user: "0"
+    command: ["hdfs", "namenode"]
+    environment:
+      - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+      - ENSURE_NAMENODE_DIR=/tmp/hadoop-root/dfs/name
+    # On a 16 GB laptop, set Docker Desktop memory to 10 GB and uncomment:
+    # mem_limit: 1.5g
+    # mem_reservation: 768m
+    ports:
+      - "${HDFS_WEB_UI_PORT:-9870}:9870"
+      - "9000:9000"
+    volumes:
+      - ./config/hdfs/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hdfs/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - namenode_data:/opt/hadoop/data/nameNode
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfs -ls / 2>/dev/null | head -1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+
+  datanode:
+    image: apache/hadoop:3.4.1
+    container_name: datanode
+    user: "0"
+    command: ["hdfs", "datanode"]
+    environment:
+      - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+    # On a 16 GB laptop, uncomment:
+    # mem_limit: 1g
+    # mem_reservation: 512m
+    volumes:
+      - ./config/hdfs/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./config/hdfs/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - datanode_data:/opt/hadoop/data/dataNode
+    networks:
+      - bigdata-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_DAEMON_MEMORY=1g
+    # On a 16 GB laptop, uncomment:
+    # mem_limit: 512m
+    # mem_reservation: 256m
+    ports:
+      - "8088:8080"
+      - "7077:7077"
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+      - ./scripts:/opt/spark/scripts:ro
+      - spark_data:/tmp/spark
+    networks:
+      - bigdata-net
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      - SPARK_DAEMON_MEMORY=1g
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_WORKER_CORES=2
+    # On a 16 GB laptop, uncomment:
+    # mem_limit: 2g
+    # mem_reservation: 1g
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+      - ./scripts:/opt/spark/scripts:ro
+      - spark_data:/tmp/spark
+    networks:
+      - bigdata-net
+    depends_on:
+      - spark-master
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    # On a 16 GB laptop, uncomment:
+    # mem_limit: 1g
+    # mem_reservation: 512m
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./sql/gold_schema.sql:/docker-entrypoint-initdb.d/02-gold-schema.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: postgres-exporter
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    ports:
+      - "9187:9187"
+    networks:
+      - bigdata-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    ports:
+      - "${CADVISOR_PORT:-8081}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - bigdata-net
+    privileged: true
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    container_name: pushgateway
+    ports:
+      - "9091:9091"
+    networks:
+      - bigdata-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - bigdata-net
+    depends_on:
+      - cadvisor
+      - postgres-exporter
+      - pushgateway
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - bigdata-net
+    depends_on:
+      - prometheus
+
+networks:
+  bigdata-net:
+    driver: bridge
+
+volumes:
+  namenode_data:
+  datanode_data:
+  spark_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
