@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Secrets / creds
+*.json.enc
+service-account*.json
+gcp-credentials.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Node (if dashboard added later)
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Project data (HDFS local mounts, dumps)
+data/
+hdfs/
+*.parquet
+*.csv.gz
+*.json.gz
+dumps/
+torrents/
+
+# Logs
+logs/
+*.log
+
+# Harness internals (session memory, hook logs)
+.remember/
+
+CLAUDE.md

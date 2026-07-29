@@ -1,171 +1,360 @@
-# Projet Big Data – Plateforme d'Analyse de Sentiment Reddit & News
+# Projet Big Data — Data Lake & Warehouse avec Monitoring
 
-## Présentation
-
-Ce projet met en œuvre une plateforme complète de **data lake** et d'**entrepôt de données** suivant l'architecture **Medallion** (couches Bronze, Silver et Gold). Il assure l'ingestion automatisée de données mixtes (structurées et non structurées) issues de **Reddit** et de **NewsAPI**, applique des transformations avec validation de qualité, calcule des indicateurs métier (KPIs) et expose un tableau de bord de monitoring.
-
----
-
-## Objectif Métier
-
-Construire une solution de **veille d'opinion** qui croise le sentiment des communautés en ligne (Reddit) avec le ton des médias traditionnels (NewsAPI). L'analyse temporelle et la corrélation entre ces deux univers permettent d'anticiper des tendances, de mesurer l'impact médiatique et de fournir des alertes opportunes.
+**Auteur :** Adam Jemaa  
+**Promotion :** IPSSI 2026 — édition dataset simple  
+**Sujet :** plateforme data lake + warehouse — Medallion Bronze/Silver/Gold, ≥5 Go de données mixtes, Spark non local sur cluster Docker, monitoring Grafana par couche.
 
 ---
 
-## Sources de Données
+## 1. Présentation
 
-| Source | Type | Métadonnées structurées | Contenu non structuré | Accès | Volume |
-|--------|------|--------------------------|------------------------|-------|--------|
-| **Reddit** (API PRAW) | Mixte | Score, date, subreddit, auteur, nb commentaires | Titres et corps des posts / commentaires | API gratuite, rate limiting géré | Scraping continu → 5 Go+ |
-| **NewsAPI** (API REST) | Mixte | Source, date de publication, URL, auteur | Titres, descriptions, contenu des articles | 100 requêtes/jour (gratuit), historique 1 mois | ~100 articles/jour |
+Plateforme data lake + warehouse suivant l'architecture Medallion (Bronze → Silver → Gold). Ingestion automatisée de données mixtes (structurées et non structurées) depuis Reddit (dump bulk + PRAW live) et NewsAPI. Transformations distribuées via Apache Spark sur cluster Docker (1 worker par défaut, scalable via `--scale`). KPIs exposés dans PostgreSQL, supervisés via Grafana + Prometheus + cAdvisor.
 
-Ces deux sources répondent conjointement aux exigences de **volume** (Reddit), de **diversité** (structuré / non structuré) et de **récupération automatisée** via API.
+Objectif métier : veille d'opinion croisant sentiment des communautés en ligne (Reddit) et ton des médias traditionnels (NewsAPI), pour anticiper tendances et détecter des alertes opportunes.
 
 ---
 
-## Architecture Medallion
-
-La plateforme s'articule en trois couches logicielles distinctes.
-
-### Bronze – Données brutes
-- Stockage des réponses JSON brutes des APIs, sans transformation.
-- Partitionnement par date d'ingestion dans **Cloudflare R2** (stockage objet S3-compatible).
-
-### Silver – Données nettoyées et indexées
-- Validation de schéma, conversion de types, déduplication exacte et approchée.
-- Enrichissement avec une colonne `source_type` et extraction des champs pertinents.
-- Stockage au format **Parquet** pour des performances de requête optimales.
-
-### Gold – KPIs et entrepôt
-- Calcul des indicateurs métier :
-  - **Score de sentiment quotidien** (VADER) par source
-  - **Volume de mentions** par jour
-  - **Top subreddits** et **top sources médias**
-  - **Tendance mobile sur 7 jours**
-- Stockage des résultats dans **Google BigQuery**, accessible pour le tableau de bord.
-
----
-
-## Flux de Données
+## Flux global du pipeline
 
 ```mermaid
-flowchart TD
-    R[API Reddit] --> BR[(Bronze / R2)]
-    N[API NewsAPI] --> BN[(Bronze / R2)]
-    GA[GitHub Actions] -->|déclenche| GC[Google Colab – Spark]
-    GC -->|lit/écrit| BR
-    GC -->|lit/écrit| BN
-    GC -->|nettoie| SP[(Silver / Parquet)]
-    GC -->|calcule KPIs| DB[(BigQuery)]
-    DB --> API[Routes API Next.js]
-    API --> V[Tableau de bord Vercel]
+flowchart LR
+    subgraph Sources["Sources"]
+        R["Reddit (PRAW + archives)"]
+        N["NewsAPI"]
+    end
+
+    subgraph Bronze["Bronze — HDFS brut"]
+        BR["bronze/reddit/YYYY/MM/DD"]
+        BN["bronze/news/YYYY/MM/DD"]
+    end
+
+    subgraph Spark["Spark cluster (1 master + N workers)"]
+        S1["Silver: schéma + dédup + Parquet"]
+        S2["Gold: VADER + agrégations SQL"]
+    end
+
+    SV["silver/ (Parquet, partitionné)"]
+    PG[("PostgreSQL — schéma gold")]
+
+    subgraph Mon["Monitoring"]
+        Prom["Prometheus"]
+        Graf["Grafana (1 dashboard)"]
+        CA["cAdvisor (docker stats)"]
+    end
+
+    R --> BR
+    N --> BN
+    BR --> S1
+    BN --> S1
+    S1 --> SV
+    SV --> S2
+    S2 --> PG
+    PG --> Graf
+    BR -.métriques.-> Prom
+    S1 -.métriques.-> Prom
+    S2 -.métriques.-> Prom
+    CA -.métriques.-> Prom
+    Prom --> Graf
 ```
 
----
-
-## Stack Technique
-
-| Composant | Service | Rôle |
-|-----------|---------|------|
-| **Orchestration** | GitHub Actions | Planification (cron) et déclenchement du pipeline |
-| **Traitement distribué** | Google Colab (Spark) | Exécution des jobs PySpark (12 Go RAM, gratuit) |
-| **Stockage (Bronze/Silver)** | Cloudflare R2 | Bucket S3, 10 Go gratuits, persistant |
-| **Entrepôt (Gold)** | Google BigQuery | 10 Go stockage + 1 To requêtes/mois, intégration native avec Vercel |
-| **Tableau de bord** | Vercel + Next.js (TypeScript) | Application full-stack, routes API sécurisées, mise à jour dynamique |
-| **Monitoring** | Logs GitHub Actions + BigQuery | Suivi des exécutions et des requêtes, aucun outil supplémentaire nécessaire |
+Les flèches pleines portent les données : Sources → Bronze HDFS → Spark Silver → Spark Gold → Postgres. Les flèches pointillées portent les métriques vers Prometheus, qui alimente Grafana.
 
 ---
 
-## Indicateurs Métier (KPIs)
+## 2. Conformité au cahier des charges
+
+| Exigence (docx) | Couverture | Localisation |
+|---|---|---|
+| Bronze / Silver / Gold | OK | `jobs/bronze_ingest.py`, `jobs/silver_transform.py`, `jobs/gold_kpis.py` |
+| 5 Go+ données mixtes | OK | Dump Reddit bulk (Kaggle/torrent) + PRAW live + NewsAPI |
+| Structuré + non structuré | OK | Métadonnées Reddit/NewsAPI + texte posts/articles |
+| Fetch automatisé via API | OK | `scripts/fetch_reddit.py` (PRAW), `scripts/fetch_newsapi.py` |
+| Spark non local | OK | Cluster Docker : 1 master + N workers (défaut 1, scalable via `--scale`) |
+| Workers logiques | OK | `docker compose up --scale spark-worker=N` |
+| Aucune configuration manuelle | OK | `.env` + YAML, aucun `.sh` |
+| Monitoring Grafana | OK | `monitoring/grafana/dashboards/` (1 dashboard, 6-8 panels) |
+| Métriques par couche | OK | Bronze (records, durée), Silver (nulls, invalides, doublons exacts), Gold (lignes chargées, durée) |
+| Prometheus + métriques système | OK | `monitoring/prometheus.yml` + `cadvisor` (docker stats, remplace node-exporter) |
+| PostgreSQL pour Gold | OK | Service `postgres` dans `docker-compose.yml` |
+| HDFS | OK | Services `namenode` + `datanode` (Bitnami image) |
+| Docker Compose + Makefile | OK | `docker-compose.yml` + `docker-compose.override.yml` (laptop) + `Makefile` (up/down/ingest/transform/load/monitor/demo/test/reset) |
+
+---
+
+## 3. Sources de données
+
+### Sources principales
+
+| Source | Type | Structuré | Non structuré | Volume visé |
+|---|---|---|---|---|
+| **Reddit bulk dump** | Archive statique (Kaggle / torrent) | id, subreddit, timestamp, score, auteur | titre + corps + commentaires | 3–5 Go (1 chargement) |
+| **Reddit live (PRAW)** | API REST | id, subreddit, timestamp, score, auteur | titre + corps + top comments | 50–200 Mo/jour |
+| **NewsAPI** | API REST | source, date, URL, auteur | titre + description (headlines) | 10–50 Mo/jour |
+
+**Total attendu : > 5 Go** (bulk + flux cumulé).
+
+### Sources complémentaires
+
+- **Bulk Reddit.** Pushshift n'est plus accessible publiquement depuis 2023. On utilise en priorité un dump Kaggle (ex. *Reddit Comments* de borismarjanovic, ~5–10 Go compressé), ou un miroir maintenu (Arctic Shift) ou torrent (Academic Torrents, 40 000+ subreddits, plusieurs To). Chargement unique via `scripts/bulk_load_reddit.py`.
+- **PRAW.** Flux live quotidien depuis 10–15 subreddits financiers/actu (`r/wallstreetbets`, `r/stocks`, `r/CryptoCurrency`, `r/technology`, `r/news`, etc.). Couvre l'exigence « fetch automatisé via API ».
+
+### Justification du choix
+
+Le couple Reddit + NewsAPI coche les cases du sujet :
+
+- Mixte : métadonnées structurées + texte libre.
+- API-fetchable : PRAW (gratuit, quotas généreux) + NewsAPI (100 req/jour, suffisant pour headlines en flux continu).
+- 5 Go+ rapide : un dump Kaggle donne le volume en un `bulk_load`, le live PRAW alimente la démonstration incrémentale.
+- Analytiquement riche : VADER pour sentiment, agrégations temporelles, top entities. Couvre les KPIs demandés en §3 du sujet.
+
+---
+
+## 4. Architecture Medallion
+
+### Bronze — données brutes
+
+- Ingestion des réponses JSON brutes des APIs, sans transformation.
+- Stockage sur HDFS (`/data/bronze/{source}/{YYYY/MM/DD}/`).
+- Partitionnement par date d'ingestion.
+- Métriques : nombre de records écrits, débit d'écriture (records/s, Mo/s), durée d'ingestion, statut (succès/échec par lot).
+
+### Silver — données nettoyées et indexées
+
+- Lecture Bronze depuis HDFS, transformation via Spark distribué.
+- Validation de schéma, conversion de types, parsing des timestamps.
+- Déduplication exacte : hash SHA-256 sur `(source, external_id, ingested_at)`.
+- Enrichissement : colonne `source_type` (`reddit_post` | `reddit_comment` | `news_article`).
+- Stockage Parquet partitionné par `source_type` et date.
+- Métriques : comptage nulls par colonne, records invalides (échec schéma), doublons exacts trouvés, durée transformation, taux de succès.
+- La déduplication approchée (MinHash/LSH) est écartée pour ce livrable. Elle ajoute de la complexité (lib `datasketch`, tuning Jaccard) sans rapporter de points au cahier des charges. La déduplication exacte couvre les cas de rejeu d'ingestion.
+
+### Gold — KPIs et entrepôt
+
+Lecture Silver, agrégations via Spark SQL :
+
+- Score de sentiment quotidien (VADER) par source.
+- Volume de mentions par jour et par source.
+- Top subreddits et top sources médias sur 7 jours glissants.
+- Tendance mobile 7 jours du sentiment moyen.
+
+Chargement dans PostgreSQL (schéma `gold`, tables partitionnées par date).
+
+Métriques : durée de calcul, lignes agrégées, lignes écrites en base, taux de succès.
+
+---
+
+## 5. Stack technique
+
+| Composant | Technologie | Rôle |
+|---|---|---|
+| **Orchestration** | Makefile + cron | Cible Bronze → Silver → Gold via `make demo` |
+| **Traitement distribué** | Apache Spark (cluster Docker, 1 master + N workers) | Transformations Silver + Gold |
+| **Stockage brut** | HDFS (Bitnami) | Couche Bronze |
+| **Stockage intermédiaire** | HDFS | Couche Silver (Parquet) |
+| **Entrepôt** | PostgreSQL 16 | Couche Gold (schéma `gold`) |
+| **Monitoring** | Prometheus + cAdvisor + Grafana | Métriques cluster + per-layer ops, 1 dashboard |
+| **Conteneurisation** | Docker Compose + `docker-compose.override.yml` | Services + limites mémoire laptop |
+| **CLI** | Makefile | `make up/down/ingest/transform/load/monitor/demo/test/reset/logs` |
+
+Aucun service cloud externe. Stack locale, reproductible, conforme au sujet. Le `docker-compose.override.yml` applique les `mem_limit` adaptés à un laptop 16 Go (10 Go alloués à Docker Desktop). En production, supprimer l'override pour libérer les contraintes.
+
+---
+
+## 6. Monitoring & observabilité
+
+### Stack
+
+- **Prometheus** scrape :
+  - cAdvisor (CPU, RAM, disque, I/O par conteneur Docker). Remplace Node Exporter, mêmes métriques sans la complexité d'un service additionnel.
+  - `spark-master` / `spark-workers` (métriques Spark via JMX exporter).
+  - `postgres-exporter` (connexions, requêtes, latence).
+  - Métriques applicatives émises par les jobs Python (pushgateway).
+- **Grafana** : 1 dashboard unifié (6–8 panels) provisionné automatiquement :
+  1. Cluster — CPU/RAM/disque par conteneur (depuis cAdvisor).
+  2. Bronze — Records écrits / seconde d'ingestion.
+  3. Silver — Doublons exacts trouvés, records invalides, durée transformation.
+  4. Gold — Lignes chargées, durée calcul KPI.
+  5. Métier — Sentiment moyen 7j (depuis Postgres), volume de mentions, top subreddit/source.
+
+### Métriques exposées
+
+Émises par les jobs Python via `prometheus_client` (pushgateway) ou par les exporters de service :
+
+- `bronze_records_total{source}`
+- `bronze_write_duration_seconds{source}`
+- `silver_null_count_total{column, source}`
+- `silver_duplicates_exact_total{source}`
+- `silver_invalid_records_total{source}`
+- `gold_rows_loaded_total{table}`
+- `gold_kpi_compute_duration_seconds{kpi}`
+
+### Pourquoi 1 dashboard et non 3
+
+Le brief demande du monitoring par couche, pas un nombre de dashboards. Un dashboard unifié à 6-8 panels couvre les trois axes (cluster, pipeline, métier) en une vue, plus simple à démontrer et à maintenir. Les panels sont filtrables par couche via les labels Prometheus.
+
+---
+
+## 7. Indicateurs métier (KPIs)
 
 | KPI | Description | Source |
-|-----|-------------|--------|
+|---|---|---|
 | Sentiment quotidien | Moyenne du score VADER par source et par jour | Texte des posts / articles |
 | Volume de mentions | Nombre de posts / articles par jour | Métadonnées de date |
 | Top subreddits | Classement des communautés les plus actives | Champ `subreddit` |
 | Top sources médias | Classement des médias les plus cités | Champ `source_name` |
-| Tendance 7 jours | Moyenne mobile du sentiment pour détecter les inflexions | Agrégations quotidiennes |
+| Tendance 7 jours | Moyenne mobile du sentiment | Agrégations quotidiennes |
 
 ---
 
-## Déploiement et Configuration
-
-L'ensemble de la configuration s'effectue via des **variables d'environnement** et des **secrets GitHub**. Aucune intervention manuelle sur les serveurs n'est nécessaire.
-
-### Variables d'environnement
-
-Les clés suivantes doivent être définies dans les secrets du dépôt GitHub :
-
-- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`
-- `NEWSAPI_KEY`
-- `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET_NAME`, `R2_ENDPOINT`
-- `BIGQUERY_PROJECT`, `BIGQUERY_DATASET`, `BIGQUERY_CREDENTIALS_JSON`
-
-### Workflow GitHub Actions
-
-Un fichier `.github/workflows/pipeline.yml` définit le déclenchement automatique toutes les 6 heures (ou à la demande). Il installe les dépendances Python, puis exécute le script `main.py` qui :
-
-1. Récupère les données via les APIs (couche Bronze)
-2. Les téléverse dans Cloudflare R2
-3. Lance le notebook Google Colab (via une API ou une tâche `gcloud`) pour les traitements Spark (Silver et Gold)
-4. Charge les résultats dans BigQuery
-
-### Tableau de bord Vercel
-
-L'application Next.js est déployée sur Vercel. Elle expose :
-- Des **routes API** sécurisées qui interrogent BigQuery en temps réel.
-- Une **interface React/TypeScript** qui affiche les KPIs sous forme de graphiques et de cartes statistiques.
-
-Le tableau de bord est mis à jour dynamiquement à chaque chargement de page et propose un rafraîchissement périodique toutes les 5 minutes.
-
----
-
-## Structure du Dépôt
+## 8. Structure du dépôt
 
 ```
 BigDataProject/
-├── .github/workflows/pipeline.yml   # Orchestration GitHub Actions
-├── dashboard/                        # Application Next.js (TypeScript)
-│   ├── pages/api/                   # Routes API (BigQuery)
-│   ├── pages/dashboard.tsx          # Interface utilisateur
-│   ├── components/                  # Composants réutilisables
-│   ├── types/                       # Interfaces TypeScript
-│   └── lib/                         # Clients et requêtes
-├── scripts/                         # Scripts d'ingestion (Python)
-│   ├── fetch_reddit.py
-│   ├── fetch_newsapi.py
-│   └── upload_to_r2.py
-├── jobs/                            # Jobs Spark (PySpark)
-│   ├── silver_transform.py
-│   └── gold_kpis.py
-├── notebooks/colab_pipeline.ipynb   # Notebook exécuté sur Colab
-├── main.py                          # Point d'entrée du pipeline
-├── requirements.txt                 # Dépendances Python
+├── docker-compose.yml              # namenode, datanode, spark-master, spark-worker, postgres, prometheus, grafana, cadvisor
+├── docker-compose.override.yml     # mem_limit par service (mode laptop, 10 Go Docker Desktop)
+├── Makefile                        # make up/down/ingest/transform/load/monitor/demo/test/reset/logs
+├── .env.example                    # Template des variables d'environnement
+├── config/
+│   ├── spark/                      # spark-defaults.conf, log4j.properties
+│   ├── hdfs/                       # core-site.xml, hdfs-site.xml
+│   └── postgres/                   # init.sql (schéma gold)
+├── scripts/
+│   ├── fetch_reddit.py             # Ingestion Bronze via PRAW (live)
+│   ├── fetch_newsapi.py            # Ingestion Bronze via NewsAPI
+│   ├── bulk_load_reddit.py         # Ingestion bulk unique depuis Kaggle dump / torrent
+│   └── upload_to_hdfs.py           # Wrapper HDFS (hdfs cli ou WebHDFS)
+├── jobs/
+│   ├── bronze_ingest.py            # Orchestrateur Bronze
+│   ├── silver_transform.py         # Spark : schéma + dédup SHA-256 + Parquet
+│   └── gold_kpis.py                # Spark : agrégations + load Postgres
+├── sql/
+│   └── gold_schema.sql             # DDL tables Gold partitionnées
+├── tests/
+│   ├── test_smoke_bronze.py        # 10 records → 10 sur HDFS
+│   ├── test_smoke_silver.py        # 10 records → 10 Parquet valides
+│   └── test_smoke_gold.py          # 10 records → 10 lignes Postgres
+├── monitoring/
+│   ├── prometheus.yml              # Scrape config (spark, postgres, cadvisor, pushgateway)
+│   ├── alerts.yml                  # Règles d'alerte (pipeline en retard, espace HDFS)
+│   └── grafana/
+│       ├── dashboards/             # 1 dashboard JSON unifié (6-8 panels)
+│       └── provisioning/           # datasources + dashboard auto-load
+├── notebooks/
+│   └── exploration.ipynb           # Dev / debug local (pas dans le pipeline prod)
+├── main.py                         # Point d'entrée : orchestration des 3 jobs
+├── requirements.txt                # praw, requests, pyspark, vaderSentiment, prometheus_client, psycopg2-binary
 └── README.md
 ```
 
 ---
 
-## Conformité avec le Cahier des Charges
+## 9. Démarrage rapide
 
-| Exigence | Couverture |
-|----------|------------|
-| 5 Go+ de données mixtes | ✅ Scraping continu Reddit + historique NewsAPI |
-| Structuré / non structuré | ✅ Métadonnées + textes |
-| Récupération automatisée via API | ✅ PRAW et NewsAPI REST |
-| Zéro configuration manuelle | ✅ Variables d'environnement et secrets |
-| Apache Spark (non local) | ✅ Exécution sur Google Colab (distribué) |
-| Monitoring | ✅ Logs GitHub Actions + suivi BigQuery |
-| Containerisation | ⚠️ Approche cloud-native sans Docker (les services sont hébergés) |
+### Pré-requis
+
+- Docker + Docker Compose v2.
+- Python 3.11+ (pour exécution locale des scripts d'ingestion).
+- 16 Go RAM minimum (cluster Spark + HDFS + Postgres + monitoring).
+- Docker Desktop : allouer 10 Go de RAM minimum (Settings → Resources → Memory). Sans cela, swap et OOMs garantis.
+
+### Configuration
+
+```bash
+cp .env.example .env
+# Renseigner : REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD, NEWSAPI_KEY
+```
+
+### Commandes
+
+```bash
+make up              # Démarre tout le cluster (HDFS, Spark, Postgres, Prometheus, Grafana, cAdvisor)
+make init-hdfs       # Crée les répertoires /data/bronze, /data/silver, /data/gold
+make bulk            # Bronze : charge un dump Reddit (Kaggle/torrent) → HDFS, one-shot
+make ingest          # Bronze : fetch live PRAW + NewsAPI → HDFS
+make transform       # Silver : nettoyage + dedup SHA-256 → HDFS Parquet
+make load            # Gold : agrégations Spark → PostgreSQL
+make demo            # Tout en un : up + bulk + transform + load + URLs Grafana/Prometheus
+make monitor         # Ouvre Grafana (http://localhost:3000) + Prometheus (http://localhost:9090)
+make test            # Smoke tests pytest (Bronze/Silver/Gold, 10 records chacun)
+make logs            # Tail des logs de tous les services
+make down            # Stop + suppression des conteneurs (volumes préservés)
+make reset           # Down + suppression des volumes (reset complet)
+```
+
+### URLs locales
+
+| Service | URL | Identifiants |
+|---|---|---|
+| Spark Master UI | http://localhost:8080 | — |
+| HDFS NameNode UI | http://localhost:9870 | — |
+| PostgreSQL | `localhost:5432` | `gold` / `gold` / `gold` |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | `admin` / `admin` |
+| cAdvisor | http://localhost:8081 | — |
 
 ---
 
-## Justification de l'Architecture
+## 10. Variables d'environnement
 
-L'architecture entièrement cloud a été privilégiée pour :
+Tout via `.env` (jamais commit) :
 
-- **Éviter toute sollicitation des ressources locales** – le projet tourne intégralement dans le cloud.
-- **Bénéficier de tiers gratuits et généreux** – tous les services utilisés (GitHub Actions, Colab, R2, BigQuery, Vercel) proposent des offres gratuites adaptées à un projet étudiant.
-- **Utiliser des standards du marché** – Spark, BigQuery, Next.js, TypeScript, GitHub Actions sont des technologies plébiscitées en entreprise.
-- **Assurer une disponibilité continue** – le pipeline s'exécute automatiquement et le tableau de bord est accessible en permanence.
-- **Garantir une automatisation totale** – de l'ingestion à la visualisation, aucune intervention humaine n'est requise.
+| Variable | Usage |
+|---|---|
+| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD` | Auth PRAW (live) |
+| `NEWSAPI_KEY` | Auth NewsAPI |
+| `REDDIT_BULK_PATH` | Chemin local vers le dump Kaggle / torrent (pour `make bulk`) |
+| `HDFS_NAMENODE` | Hôte HDFS (default `namenode`) |
+| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Connexion Gold |
+| `SPARK_MASTER_URL` | URL du master Spark |
+| `GRAFANA_ADMIN_PASSWORD` | Mot de passe admin Grafana |
+| `PROMETHEUS_RETENTION` | Durée de rétention TSDB (default `15d`) |
+| `CADVISOR_PORT` | Port UI cAdvisor (default `8081`) |
+
+---
+
+## 11. Justification de l'architecture
+
+**Stack 100% Docker locale.**
+- Conformité directe avec le sujet (Docker Compose, HDFS, Spark, PostgreSQL, Prometheus, Grafana).
+- Tout l'environnement tient dans `docker-compose.yml` (+ override pour laptop).
+- Aucun quota API cloud, aucun coût récurrent.
+- On voit passer chaque couche dans Grafana, on débugue vraiment Spark distribué.
+
+**Spark distribué (workers logiques).**
+- `docker compose up --scale spark-worker=N` scale à la demande.
+- Défaut : 1 worker (suffisant pour le volume traité, économe en RAM laptop).
+- Spark UI (`localhost:8080`) visualise le DAG et le scheduling.
+
+**cAdvisor plutôt que Node Exporter.**
+- Node Exporter ajoute un service pour des métriques CPU/RAM que `docker stats` expose déjà.
+- cAdvisor (= `google/cadvisor`) parle nativement Prometheus et graphe par conteneur.
+- Un service en moins, même couverture monitoring, intégration Grafana triviale.
+
+**Un dashboard Grafana plutôt que trois.**
+- Le brief demande du monitoring par couche, pas un nombre de dashboards.
+- Un dashboard unifié à 6-8 panels couvre cluster + Bronze + Silver + Gold + métier en une vue.
+- Plus simple à démontrer, à maintenir, à défendre à l'oral.
+
+**Choix de Reddit (bulk + live) + NewsAPI.**
+- Bulk : un dump Kaggle (~5 Go compressé) atteint le volume exigé en un seul chargement. Pushshift est mort depuis 2023, Kaggle / Arctic Shift / Academic Torrents sont les alternatives viables.
+- Live : PRAW + NewsAPI couvrent l'exigence « fetch automatisé via API » et maintiennent le volume en croissance.
+- Voir §3 pour le détail dataset.
+
+**VADER pour le sentiment.**
+- Standard pour texte social, rapide, pas de GPU, intégré NLTK.
+- Optimisé pour réseaux sociaux, moins pour news formelles. Acceptable pour ce projet, mentionné explicitement.
+
+**Stratégie mem_limit (laptop).**
+- `docker-compose.override.yml` applique des limites par service pour tenir dans 10 Go Docker Desktop.
+- Total idle ≈ 5-7 Go, processing peak ≈ 8-12 Go, marge confortable sur 16 Go physiques.
+- En production, ignorer l'override : limites levées, Spark peut consommer ce qu'il veut.
+
+---
+
+## 12. Limites connues & pistes d'amélioration
+
+- **VADER limité au texte court social.** Migrer vers un modèle transformer (DistilBERT sentiment) pour le news en v2.
+- **NewsAPI quota gratuit** (100 req/jour). Suffisant pour démo headlines, à remplacer par RSS multi-sources pour production.
+- **Dedup exacte uniquement.** Suffisante pour rejeux d'ingestion. La dédup approchée (MinHash/LSH) servirait si la source reintroduit des near-duplicates massifs (repost, syndication).
+- **1 worker Spark par défaut.** La scalabilité est démontrée par `--scale` mais pas stress-testée en condition réelle sur ce livrable.
+- **Smoke tests uniquement.** pytest couvre 10 records par couche, pas de tests de propriétés (great-expectations) ni de tests de charge.
