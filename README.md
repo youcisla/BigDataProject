@@ -1,191 +1,171 @@
-# Big Data Project - Reddit & News Sentiment Analysis Platform
+# Projet Big Data – Plateforme d'Analyse de Sentiment Reddit & News
 
-This project implements a complete data lake and warehouse platform using the Medallion architecture (Bronze, Silver, Gold layers). The system ingests mixed data from Reddit and NewsAPI, performs automated transformations with quality validation, exposes business KPIs, and provides monitoring of operations across all layers.
+## Présentation
 
-## Project Subject
+Ce projet met en œuvre une plateforme complète de **data lake** et d'**entrepôt de données** suivant l'architecture **Medallion** (couches Bronze, Silver et Gold). Il assure l'ingestion automatisée de données mixtes (structurées et non structurées) issues de **Reddit** et de **NewsAPI**, applique des transformations avec validation de qualité, calcule des indicateurs métier (KPIs) et expose un tableau de bord de monitoring.
 
-The goal is to build a sentiment analysis and trend monitoring platform that combines social media opinion (Reddit) with mainstream media coverage (NewsAPI). By processing and analyzing text data from both sources, the platform identifies sentiment trends, correlates public opinion with media coverage, and surfaces actionable insights through a dashboard.
+---
 
-## Data Sources
+## Objectif Métier
 
-The project uses two complementary data sources to reach the required 5GB minimum while providing both structured and unstructured data.
+Construire une solution de **veille d'opinion** qui croise le sentiment des communautés en ligne (Reddit) avec le ton des médias traditionnels (NewsAPI). L'analyse temporelle et la corrélation entre ces deux univers permettent d'anticiper des tendances, de mesurer l'impact médiatique et de fournir des alertes opportunes.
 
-### Reddit (via PRAW API)
-- **Type**: Unstructured text (posts and comments) plus structured metadata
-- **Metadata**: score, creation date, subreddit, author, number of comments
-- **Access**: Free API via the PRAW Python library
-- **Volume**: Continuous scraping over several weeks to reach 5GB or more
-- **Justification**: Reddit provides rich, authentic user-generated text data ideal for sentiment analysis. The PRAW API is well-documented, handles rate limiting automatically, and allows both batch and real-time fetching.
+---
 
-### NewsAPI
-- **Type**: Unstructured text (article titles, descriptions, content) plus structured metadata
-- **Metadata**: source name, publication date, URL, author
-- **Access**: Free tier REST API (100 requests per day, one month of history)
-- **Volume**: Approximately 100 articles per day
-- **Justification**: NewsAPI aggregates articles from thousands of sources, providing a broad view of media coverage. It complements Reddit by offering a more formal and editorial perspective, enabling interesting comparisons between public opinion and professional journalism.
+## Sources de Données
 
-Together, these sources satisfy the requirement for mixed data (structured and unstructured) and automated API-based ingestion.
+| Source | Type | Métadonnées structurées | Contenu non structuré | Accès | Volume |
+|--------|------|--------------------------|------------------------|-------|--------|
+| **Reddit** (API PRAW) | Mixte | Score, date, subreddit, auteur, nb commentaires | Titres et corps des posts / commentaires | API gratuite, rate limiting géré | Scraping continu → 5 Go+ |
+| **NewsAPI** (API REST) | Mixte | Source, date de publication, URL, auteur | Titres, descriptions, contenu des articles | 100 requêtes/jour (gratuit), historique 1 mois | ~100 articles/jour |
 
-## Architecture Overview (Medallion)
+Ces deux sources répondent conjointement aux exigences de **volume** (Reddit), de **diversité** (structuré / non structuré) et de **récupération automatisée** via API.
 
-The platform follows the Medallion architecture with three distinct data layers.
+---
 
-**Bronze Layer (Raw Data)**
-This layer stores data exactly as it is fetched from the APIs. No transformations are applied. Reddit data is saved as raw JSON lines, and NewsAPI responses are stored in their original JSON format. Data is partitioned by ingestion date in HDFS.
+## Architecture Medallion
 
-**Silver Layer (Cleaned and Indexed Data)**
-This layer performs schema validation, type conversion, deduplication, and enrichment. For Reddit, we extract relevant fields such as title, body text, score, and subreddit. For NewsAPI, we extract title, description, content, and source. Null values are handled, duplicates are removed, and an additional column is added to indicate the source type. The cleaned data is stored in Parquet format for better query performance.
+La plateforme s'articule en trois couches logicielles distinctes.
 
-**Gold Layer (KPIs and Data Warehouse)**
-This layer calculates business KPIs and stores them in PostgreSQL. Key operations include sentiment scoring using the VADER library, daily aggregation of sentiment averages, volume counting, and ranking of top subreddits and news sources. The results are structured as tables and made available for dashboarding and BI tools.
+### Bronze – Données brutes
+- Stockage des réponses JSON brutes des APIs, sans transformation.
+- Partitionnement par date d'ingestion dans **Cloudflare R2** (stockage objet S3-compatible).
 
-## Data Pipeline Diagram
+### Silver – Données nettoyées et indexées
+- Validation de schéma, conversion de types, déduplication exacte et approchée.
+- Enrichissement avec une colonne `source_type` et extraction des champs pertinents.
+- Stockage au format **Parquet** pour des performances de requête optimales.
 
-The following diagram illustrates the complete data flow from ingestion to visualization.
+### Gold – KPIs et entrepôt
+- Calcul des indicateurs métier :
+  - **Score de sentiment quotidien** (VADER) par source
+  - **Volume de mentions** par jour
+  - **Top subreddits** et **top sources médias**
+  - **Tendance mobile sur 7 jours**
+- Stockage des résultats dans **Google BigQuery**, accessible pour le tableau de bord.
+
+---
+
+## Flux de Données
 
 ```mermaid
 flowchart TD
-    subgraph Sources["Data Sources"]
-        R[Reddit API - PRAW]
-        N[NewsAPI - REST]
-    end
-
-    subgraph Bronze["Bronze Layer - HDFS"]
-        BR["/bronze/reddit/ - raw JSON"]
-        BN["/bronze/newsapi/ - raw JSON"]
-    end
-
-    subgraph Silver["Silver Layer - HDFS"]
-        S[Spark Job: Clean and Validate\n- Parse JSON\n- Deduplicate\n- Convert types\n- Enrich with source_type and date]
-        SP["/silver/ - Parquet, partitioned"]
-    end
-
-    subgraph Gold["Gold Layer - PostgreSQL"]
-        G[Spark Job: Compute KPIs\n- Sentiment analysis with VADER\n- Daily aggregations\n- Top subreddits and sources]
-        DB[(PostgreSQL tables)]
-    end
-
-    subgraph Orchestration["Orchestration"]
-        A[Airflow DAG - scheduled daily]
-    end
-
-    subgraph Monitoring["Monitoring"]
-        P[Prometheus]
-        Gf[Grafana Dashboard]
-        NE[Node Exporter]
-    end
-
-    R -->|fetch| BR
-    N -->|fetch| BN
-    BR --> S
-    BN --> S
-    S --> SP
-    SP --> G
-    G --> DB
-    A --> R
-    A --> N
-    A --> S
-    A --> G
-    NE --> P
-    P --> Gf
-    S -.->|metrics| P
-    G -.->|metrics| P
+    R[API Reddit] --> BR[(Bronze / R2)]
+    N[API NewsAPI] --> BN[(Bronze / R2)]
+    GA[GitHub Actions] -->|déclenche| GC[Google Colab – Spark]
+    GC -->|lit/écrit| BR
+    GC -->|lit/écrit| BN
+    GC -->|nettoie| SP[(Silver / Parquet)]
+    GC -->|calcule KPIs| DB[(BigQuery)]
+    DB --> API[Routes API Next.js]
+    API --> V[Tableau de bord Vercel]
 ```
 
-## Technology Stack
+---
 
-| Component | Role | Rationale |
-|-----------|------|-----------|
-| HDFS | Storage for Bronze and Silver layers | Distributed file system suitable for large volumes of raw and intermediate data |
-| Apache Spark | Data processing and transformation | Distributed processing engine with support for scaling across multiple workers |
-| PostgreSQL | Data warehouse for Gold layer | Reliable relational database with native support for BI tools and SQL queries |
-| Apache Airflow | Pipeline orchestration | Automates task scheduling, dependency management, and monitoring of ETL workflows |
-| Prometheus | Metrics collection | Industry-standard tool for collecting and storing time-series metrics |
-| Grafana | Visualization and dashboards | Connects directly to Prometheus for real-time monitoring dashboards |
-| Node Exporter | System metrics export | Exposes host-level metrics (CPU, memory, disk) for Prometheus scraping |
-| Docker Compose | Container orchestration | Ensures reproducibility, service isolation, and internal networking between components |
+## Stack Technique
 
-## Business KPIs (Gold Layer)
+| Composant | Service | Rôle |
+|-----------|---------|------|
+| **Orchestration** | GitHub Actions | Planification (cron) et déclenchement du pipeline |
+| **Traitement distribué** | Google Colab (Spark) | Exécution des jobs PySpark (12 Go RAM, gratuit) |
+| **Stockage (Bronze/Silver)** | Cloudflare R2 | Bucket S3, 10 Go gratuits, persistant |
+| **Entrepôt (Gold)** | Google BigQuery | 10 Go stockage + 1 To requêtes/mois, intégration native avec Vercel |
+| **Tableau de bord** | Vercel + Next.js (TypeScript) | Application full-stack, routes API sécurisées, mise à jour dynamique |
+| **Monitoring** | Logs GitHub Actions + BigQuery | Suivi des exécutions et des requêtes, aucun outil supplémentaire nécessaire |
 
-The following KPIs are computed from the cleaned data and stored in PostgreSQL:
+---
 
-| KPI | Description | Data Source |
-|-----|-------------|-------------|
-| Daily Sentiment Score | Average sentiment score per day per source type using VADER | Post and article text |
-| Volume of Mentions | Count of posts and articles per day | Metadata timestamps |
-| Top Subreddits | Ranking of subreddits by activity level | Subreddit field |
-| Top News Sources | Ranking of media outlets by coverage volume | Source name field |
-| 7-Day Sentiment Trend | Rolling average of sentiment to identify patterns | Daily sentiment aggregations |
+## Indicateurs Métier (KPIs)
 
-## Configuration and Deployment
+| KPI | Description | Source |
+|-----|-------------|--------|
+| Sentiment quotidien | Moyenne du score VADER par source et par jour | Texte des posts / articles |
+| Volume de mentions | Nombre de posts / articles par jour | Métadonnées de date |
+| Top subreddits | Classement des communautés les plus actives | Champ `subreddit` |
+| Top sources médias | Classement des médias les plus cités | Champ `source_name` |
+| Tendance 7 jours | Moyenne mobile du sentiment pour détecter les inflexions | Agrégations quotidiennes |
 
-All configuration is managed through environment variables and a docker-compose file. No manual setup steps are required.
+---
 
-### Environment Variables (.env file)
+## Déploiement et Configuration
 
-```
-REDDIT_CLIENT_ID=your_client_id
-REDDIT_CLIENT_SECRET=your_client_secret
-REDDIT_USERNAME=your_username
-REDDIT_PASSWORD=your_password
-NEWSAPI_KEY=your_api_key
-POSTGRES_USER=admin
-POSTGRES_PASSWORD=admin
-POSTGRES_DB=kpis
-AIRFLOW_UID=50000
-```
+L'ensemble de la configuration s'effectue via des **variables d'environnement** et des **secrets GitHub**. Aucune intervention manuelle sur les serveurs n'est nécessaire.
 
-### Makefile Commands
+### Variables d'environnement
 
-A Makefile is provided to simplify common operations:
+Les clés suivantes doivent être définies dans les secrets du dépôt GitHub :
 
-- `make start` - Starts all Docker services in the background
-- `make stop` - Stops all running containers
-- `make check-sources` - Tests API connectivity for both Reddit and NewsAPI
-- `make clean` - Removes all data from HDFS and PostgreSQL for a fresh start
+- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`
+- `NEWSAPI_KEY`
+- `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET_NAME`, `R2_ENDPOINT`
+- `BIGQUERY_PROJECT`, `BIGQUERY_DATASET`, `BIGQUERY_CREDENTIALS_JSON`
 
-### Quick Start
+### Workflow GitHub Actions
 
-Clone the repository and launch the platform:
+Un fichier `.github/workflows/pipeline.yml` définit le déclenchement automatique toutes les 6 heures (ou à la demande). Il installe les dépendances Python, puis exécute le script `main.py` qui :
 
-```bash
-git clone https://github.com/youcisla/BigDataProject.git
-cd BigDataProject
-make start
-make check-sources
-```
+1. Récupère les données via les APIs (couche Bronze)
+2. Les téléverse dans Cloudflare R2
+3. Lance le notebook Google Colab (via une API ou une tâche `gcloud`) pour les traitements Spark (Silver et Gold)
+4. Charge les résultats dans BigQuery
 
-Airflow is accessible at http://localhost:8080 and Grafana at http://localhost:3000.
+### Tableau de bord Vercel
 
-## Project Structure
+L'application Next.js est déployée sur Vercel. Elle expose :
+- Des **routes API** sécurisées qui interrogent BigQuery en temps réel.
+- Une **interface React/TypeScript** qui affiche les KPIs sous forme de graphiques et de cartes statistiques.
+
+Le tableau de bord est mis à jour dynamiquement à chaque chargement de page et propose un rafraîchissement périodique toutes les 5 minutes.
+
+---
+
+## Structure du Dépôt
 
 ```
 BigDataProject/
-├── docker-compose.yml          # Defines all services
-├── .env                        # Environment variables
-├── Makefile                    # Automation commands
-├── dags/
-│   └── reddit_news_dag.py      # Airflow DAG definition
-├── scripts/
-│   ├── fetch_reddit.py         # Reddit ingestion script
-│   ├── fetch_newsapi.py        # NewsAPI ingestion script
-│   └── upload_to_hdfs.py       # Upload utility
-├── jobs/
-│   ├── silver_transform.py     # Spark cleaning job
-│   └── gold_kpis.py            # Spark KPI computation job
-├── sql/
-│   └── schema.sql              # PostgreSQL table definitions
+├── .github/workflows/pipeline.yml   # Orchestration GitHub Actions
+├── dashboard/                        # Application Next.js (TypeScript)
+│   ├── pages/api/                   # Routes API (BigQuery)
+│   ├── pages/dashboard.tsx          # Interface utilisateur
+│   ├── components/                  # Composants réutilisables
+│   ├── types/                       # Interfaces TypeScript
+│   └── lib/                         # Clients et requêtes
+├── scripts/                         # Scripts d'ingestion (Python)
+│   ├── fetch_reddit.py
+│   ├── fetch_newsapi.py
+│   └── upload_to_r2.py
+├── jobs/                            # Jobs Spark (PySpark)
+│   ├── silver_transform.py
+│   └── gold_kpis.py
+├── notebooks/colab_pipeline.ipynb   # Notebook exécuté sur Colab
+├── main.py                          # Point d'entrée du pipeline
+├── requirements.txt                 # Dépendances Python
 └── README.md
 ```
 
-## Compliance with Project Requirements
+---
 
-| Requirement | Status | Implementation Notes |
-|-------------|--------|----------------------|
-| 5GB+ mixed data | Achieved | Continuous Reddit scraping over several weeks plus NewsAPI history |
-| Structured + unstructured data | Covered | Metadata (structured) + text content (unstructured) |
-| Automated API fetching | Implemented | PRAW for Reddit, requests for NewsAPI |
-| No manual configuration | Ensured | Everything defined in .env and docker-compose.yml |
-| Apache Spark (non-local) | Included | Spark cluster with workers running in Docker |
-| Monitoring with Grafana | Integrated | Prometheus + Grafana + Node Exporter |
-| Docker containerization | Complete | All services defined in docker-compose.yml |
+## Conformité avec le Cahier des Charges
+
+| Exigence | Couverture |
+|----------|------------|
+| 5 Go+ de données mixtes | ✅ Scraping continu Reddit + historique NewsAPI |
+| Structuré / non structuré | ✅ Métadonnées + textes |
+| Récupération automatisée via API | ✅ PRAW et NewsAPI REST |
+| Zéro configuration manuelle | ✅ Variables d'environnement et secrets |
+| Apache Spark (non local) | ✅ Exécution sur Google Colab (distribué) |
+| Monitoring | ✅ Logs GitHub Actions + suivi BigQuery |
+| Containerisation | ⚠️ Approche cloud-native sans Docker (les services sont hébergés) |
+
+---
+
+## Justification de l'Architecture
+
+L'architecture entièrement cloud a été privilégiée pour :
+
+- **Éviter toute sollicitation des ressources locales** – le projet tourne intégralement dans le cloud.
+- **Bénéficier de tiers gratuits et généreux** – tous les services utilisés (GitHub Actions, Colab, R2, BigQuery, Vercel) proposent des offres gratuites adaptées à un projet étudiant.
+- **Utiliser des standards du marché** – Spark, BigQuery, Next.js, TypeScript, GitHub Actions sont des technologies plébiscitées en entreprise.
+- **Assurer une disponibilité continue** – le pipeline s'exécute automatiquement et le tableau de bord est accessible en permanence.
+- **Garantir une automatisation totale** – de l'ingestion à la visualisation, aucune intervention humaine n'est requise.
