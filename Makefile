@@ -59,15 +59,19 @@ init-hdfs:
 	@echo "Done."
 
 bulk:
-	@if [ -z "$$REDDIT_BULK_PATH" ]; then \
-		echo "ERROR: REDDIT_BULK_PATH env var not set. Point it to a Reddit CSV/ZST dump."; \
+	@if [ -z "$$STOCKS_BULK_PATH" ]; then \
+		echo "ERROR: STOCKS_BULK_PATH env var not set. Point it to a Kaggle stocks CSV."; \
+		echo "Download: https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs"; \
 		exit 1; \
 	fi
-	@echo "Loading Reddit dump from $$REDDIT_BULK_PATH ..."
-	REDDIT_BULK_PATH=$$REDDIT_BULK_PATH python scripts/fetch_reddit.py
+	@echo "Loading stocks dump from $$STOCKS_BULK_PATH ..."
+	STOCKS_BULK_PATH=$$STOCKS_BULK_PATH python scripts/fetch_stocks.py --csv $$STOCKS_BULK_PATH
+
+crypto-live:
+	python scripts/fetch_crypto.py --folder data
 
 ingest-news:
-	python scripts/fetch_newsapi.py
+	@echo "News is bundled with crypto OHLCV in the same CSV files. Run 'make crypto-live' to ingest both."
 
 transform:
 	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop $(SPARK_SERVICE) \

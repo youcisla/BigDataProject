@@ -40,7 +40,7 @@ import { formatRelative, formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 const PIPELINE_BUTTONS: { id: Cmd; label: string; description: string; href: string }[] = [
-  { id: "bulk", label: "1. Bulk", description: "Reddit dump to HDFS Bronze", href: "#bulk" },
+  { id: "bulk", label: "1. Bulk", description: "Stocks + Crypto archives to HDFS Bronze", href: "#bulk" },
   { id: "transform", label: "2. Transform", description: "Bronze to Silver Parquet", href: "#transform" },
   { id: "load", label: "3. Load", description: "Silver to Postgres KPIs", href: "#load" },
 ];
@@ -48,6 +48,7 @@ const PIPELINE_BUTTONS: { id: Cmd; label: string; description: string; href: str
 const NAV = [
   { id: "overview", label: "Overview", icon: Sparkles, href: "#overview" },
   { id: "pipeline", label: "Pipeline", icon: GitBranch, href: "#pipeline" },
+  { id: "analysis", label: "Analysis", icon: Eye, href: "/analysis" },
   { id: "logs", label: "Logs", icon: TerminalSquare, href: "#logs" },
   { id: "settings", label: "Settings", icon: SettingsIcon, href: "#settings" },
 ];
@@ -526,7 +527,7 @@ export default function Home() {
                           </CardHeader>
                           <CardContent>
                             <div className="flex items-center gap-3 flex-wrap">
-                              {["Reddit + NewsAPI", "HDFS Bronze", "Spark Silver", "Postgres Gold"].map((stage, i) => (
+                              {["Stocks + Crypto CSVs", "HDFS Bronze", "Spark Silver", "Postgres Gold"].map((stage, i) => (
                                 <div key={stage} className="flex items-center gap-3">
                                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border bg-background/40">
                                     {jobs[Object.keys(jobs)[i] as Cmd]?.status === "done" ? (
@@ -650,7 +651,7 @@ export default function Home() {
 }
 
 function jobCmdLabel(cmd: string, args: string[]): string {
-  if (args.some((a) => a.includes("fetch_reddit"))) return "Bulk";
+  if (args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto") || a.includes("fetch_news") || a.includes("fetch_reddit"))) return "Bulk";
   if (args.some((a) => a.includes("silver_transform"))) return "Transform";
   if (args.some((a) => a.includes("gold_kpis"))) return "Load";
   return `${cmd} ${args.slice(0, 2).join(" ")}`;

@@ -1,4 +1,4 @@
-"""Silver-layer utility functions that don't require pyspark at import time.
+"""Silver-layer utility functions (pyspark-free).
 
 Lets unit tests import helpers without the heavy Spark dependency.
 """
@@ -7,39 +7,37 @@ from __future__ import annotations
 
 import hashlib
 
-# Field name -> pyspark type string. Defer pyspark import to first use.
+# Trading/Crypto schema (replaces Reddit I/P)
+# Three Bronze sources share these fields. `ticker` is the natural key
+# across stocks, crypto_live, and crypto_news.
 _FIELD_TYPES = {
     "source": "string",
-    "source_type": "string",
-    "external_id": "string",
-    "subreddit": "string",
-    "author": "string",
-    "title": "string",
-    "body": "string",
-    "score": "long",
-    "num_comments": "long",
-    "url": "string",
-    "created_utc": "double",
+    "source_type": "string",       # stock_ohlcv | crypto_ohlcv | crypto_news
+    "external_id": "string",        # hashable dedup key
+    "ticker": "string",              # AAPL | BTC | ETH (uppercased)
+    "date": "string",                # YYYY-MM-DD
+    "open": "double",
+    "high": "double",
+    "low": "double",
+    "close": "double",
+    "volume": "long",
+    "headline": "string",            # news only
+    "url": "string",                 # news only
+    "publisher": "string",          # news only
     "ingested_at": "string",
-    "source_name": "string",
-    "published_at": "string",
-    "category": "string",
 }
 
 
 def row_hash(source: str, external_id: str, ingested_at: str) -> str:
-    """SHA-256 hex digest of the dedup key (source, external_id, ingested_at)."""
     payload = f"{source}|{external_id}|{ingested_at}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
 def field_names() -> list[str]:
-    """Return the canonical field name list for the Silver layer."""
     return list(_FIELD_TYPES.keys())
 
 
 def expected_field_types() -> dict[str, str]:
-    """Return field name -> pyspark type string."""
     return dict(_FIELD_TYPES)
 
 
@@ -52,8 +50,8 @@ def build_schema():
 
     type_map = {
         "string": T.StringType(),
-        "long": T.LongType(),
         "double": T.DoubleType(),
+        "long": T.LongType(),
     }
     fields = [T.StructField(name, type_map[type_name], True) for name, type_name in _FIELD_TYPES.items()]
     return T.StructType(fields)

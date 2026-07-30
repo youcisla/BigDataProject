@@ -1,18 +1,19 @@
 """Gold layer: Silver Parquet → Postgres KPIs.
 
 Reads /data/silver/data (Parquet, partitioned by source_type + date),
-computes daily sentiment via VADER, mention volume, and 7-day rolling
-trend. Writes to Postgres schema `gold`.
+computes:
+  - daily_prices : OHLCV per ticker per day
+  - daily_returns : pct change vs prev trading day, per ticker
+  - top_movers : top 10 gainers + losers per day
+  - rolling_volatility_7d : 7-day rolling stddev of returns per ticker
+  - news_volume_per_coin : daily headline counts per ticker
 
-KPIs:
-- gold.sentiment_daily  : avg VADER sentiment per source_type per date
-- gold.mention_volume   : post/comment/article counts per source_type per date
-- gold.top_entities     : top subreddits and news sources per 7-day window
-- gold.sentiment_trend_7d : 7-day moving average of sentiment
+Writes via JDBC to Postgres schema `gold`.
 
 Run via spark-submit inside spark-master container:
     docker compose exec spark-master spark-submit \\
         --master spark://spark-master:7077 \\
+        --deploy-mode client \\
         --packages org.postgresql:postgresql:42.7.3 \\
         /opt/spark/jobs/gold_kpis.py
 """
@@ -26,7 +27,7 @@ import logging
 import os
 import sys
 import time
-from typing import Iterator
+from typing import Iterable
 
 from pyspark.sql import SparkSession, functions as F, types as T, Window
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -54,27 +55,15 @@ def build_spark() -> SparkSession:
     )
 
 
-def vader_udf_factory():
-    """Create a Spark UDF that returns VADER compound score in [-1, 1]."""
-    analyzer = SentimentIntensityAnalyzer()
-
-    @F.udf(returnType=T.FloatType())
-    def vader_score(text: str) -> float:
-        if not text:
-            return 0.0
-        return analyzer.polarity_scores(text)["compound"]
-
-    return vader_score
-
-
 def read_silver(spark: SparkSession):
     return spark.read.parquet(SILVER_BASE)
 
 
 def write_postgres(df, table: str, mode: str = "append") -> None:
-    """Write a Spark DataFrame to Postgres via JDBC."""
+    # Cast date column to DATE so Postgres accepts it (Silver stores dates as strings)
+    casted = df.withColumn("date", F.col("date").cast("date"))
     (
-        df.write.format("jdbc")
+        casted.write.format("jdbc")
         .option("url", PG_URL)
         .option("dbtable", table)
         .option("user", PG_USER)
@@ -85,82 +74,87 @@ def write_postgres(df, table: str, mode: str = "append") -> None:
     )
 
 
-def compute_sentiment_daily(silver):
-    """Average VADER sentiment per (date, source, source_type)."""
-    vader = vader_udf_factory()
-    with_scores = (
-        silver.withColumn("text", F.concat_ws(" ", F.col("title"), F.col("body")))
-        .withColumn("sentiment", vader(F.col("text")))
-    )
+def compute_daily_prices(silver):
+    """Latest close per (date, ticker, source)."""
     return (
-        with_scores.groupBy("partition_date", "source", "source_type")
-        .agg(
-            F.avg("sentiment").alias("avg_sentiment"),
-            F.count("*").alias("record_count"),
-        )
-        .withColumnRenamed("partition_date", "date")
-        .select("date", "source", "source_type", "avg_sentiment", "record_count")
+        silver.filter(F.col("source_type") != F.lit("crypto_news"))
+        .filter(F.col("close").isNotNull())
+        .groupBy("date", "ticker", "source")
+        .agg(F.first("open").alias("open"),
+             F.max("high").alias("high"),
+             F.min("low").alias("low"),
+             F.first("close").alias("close"),
+             F.sum("volume").alias("volume"))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "source", "open", "high", "low", "close", "volume", "updated_at")
     )
 
 
-def compute_mention_volume(silver):
+def compute_daily_returns(daily_prices):
+    """Per-ticker pct change vs previous trading day."""
+    w = Window.partitionBy("ticker").orderBy("date")
+    prev = F.lag("close").over(w)
     return (
-        silver.groupBy("partition_date", "source", "source_type")
-        .agg(F.count("*").alias("mention_count"))
-        .withColumnRenamed("partition_date", "date")
-        .select("date", "source", "source_type", "mention_count")
+        daily_prices.withColumn("prev_close", prev)
+        .filter(F.col("prev_close").isNotNull())
+        .withColumn("return_pct", ((F.col("close") - F.col("prev_close")) / F.col("prev_close")) * F.lit(100))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "return_pct", "updated_at")
     )
 
 
-def compute_top_entities(silver):
-    """Top 20 subreddits and source_names by mention count over all data."""
-    subreddit_counts = (
-        silver.filter(F.col("subreddit").isNotNull())
-        .groupBy("subreddit")
-        .agg(F.count("*").alias("mention_count"))
-        .withColumn("entity_type", F.lit("subreddit"))
-        .withColumnRenamed("subreddit", "entity_name")
+def compute_top_movers(daily_returns):
+    """Top 10 gainers + losers per day."""
+    w_gain = Window.partitionBy("date").orderBy(F.col("return_pct").desc())
+    w_loss = Window.partitionBy("date").orderBy(F.col("return_pct").asc())
+    gainers = (
+        daily_returns.withColumn("rank", F.row_number().over(w_gain))
+        .filter(F.col("rank") <= 10)
+        .withColumn("direction", F.lit("gain"))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "direction", "rank", "return_pct", "updated_at")
     )
-    source_name_counts = (
-        silver.filter(F.col("source_name").isNotNull())
-        .groupBy("source_name")
-        .agg(F.count("*").alias("mention_count"))
-        .withColumn("entity_type", F.lit("source_name"))
-        .withColumnRenamed("source_name", "entity_name")
+    losers = (
+        daily_returns.withColumn("rank", F.row_number().over(w_loss))
+        .filter(F.col("rank") <= 10)
+        .withColumn("direction", F.lit("loss"))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "direction", "rank", "return_pct", "updated_at")
     )
-    today = dt.date.today()
-    combined = subreddit_counts.unionByName(source_name_counts)
-    return (
-        combined.orderBy(F.col("mention_count").desc())
-        .limit(40)
-        .withColumn("window_end", F.lit(today).cast("date"))
-        .withColumn("avg_sentiment", F.lit(0.0))
-        .select("window_end", "entity_type", "entity_name", "mention_count", "avg_sentiment")
-    )
+    return gainers.unionByName(losers)
 
 
-def compute_sentiment_trend_7d(sentiment_daily):
-    """7-day moving average of sentiment per source."""
-    window = (
-        Window.partitionBy("source")
+def compute_rolling_volatility_7d(daily_returns):
+    """7-day rolling stddev of returns per ticker."""
+    w = (
+        Window.partitionBy("ticker")
         .orderBy("date")
         .rowsBetween(-6, 0)
     )
     return (
-        sentiment_daily.withColumn(
-            "avg_sentiment_7d", F.avg("avg_sentiment").over(window)
-        )
-        .select("date", "source", "avg_sentiment_7d")
+        daily_returns.withColumn("volatility", F.stddev_samp("return_pct").over(w))
+        .withColumn("sample_size", F.count("return_pct").over(w))
+        .filter(F.col("sample_size") >= 3)
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "volatility", "sample_size", "updated_at")
+    )
+
+
+def compute_news_volume_per_coin(silver):
+    """Headline count per (date, ticker)."""
+    return (
+        silver.filter(F.col("source_type") == F.lit("crypto_news"))
+        .filter(F.col("ticker").isNotNull())
+        .groupBy("date", "ticker")
+        .agg(F.count("*").alias("headline_count"))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "headline_count", "updated_at")
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gold KPI aggregation job.")
-    parser.add_argument(
-        "--date",
-        default=None,
-        help="Optional date filter (YYYY-MM-DD). If set, restricts to that date.",
-    )
+    parser.add_argument("--date", default=None, help="Optional date filter (YYYY-MM-DD).")
     args = parser.parse_args()
 
     spark = build_spark()
@@ -177,19 +171,22 @@ def main() -> int:
             return 0
         logger.info("Silver records: %d", record_count)
 
-        sentiment_daily = compute_sentiment_daily(silver)
-        mention_volume = compute_mention_volume(silver)
-        top_entities = compute_top_entities(silver)
-        sentiment_trend_7d = compute_sentiment_trend_7d(sentiment_daily)
+        daily_prices = compute_daily_prices(silver)
+        daily_returns = compute_daily_returns(daily_prices)
+        top_movers = compute_top_movers(daily_returns)
+        rolling_volatility = compute_rolling_volatility_7d(daily_returns)
+        news_volume = compute_news_volume_per_coin(silver)
 
-        logger.info("Writing sentiment_daily...")
-        write_postgres(sentiment_daily, "gold.sentiment_daily", mode="append")
-        logger.info("Writing mention_volume...")
-        write_postgres(mention_volume, "gold.mention_volume", mode="append")
-        logger.info("Writing top_entities...")
-        write_postgres(top_entities, "gold.top_entities", mode="append")
-        logger.info("Writing sentiment_trend_7d...")
-        write_postgres(sentiment_trend_7d, "gold.sentiment_trend_7d", mode="append")
+        logger.info("Writing daily_prices...")
+        write_postgres(daily_prices, "gold.daily_prices", mode="append")
+        logger.info("Writing daily_returns...")
+        write_postgres(daily_returns, "gold.daily_returns", mode="append")
+        logger.info("Writing top_movers...")
+        write_postgres(top_movers, "gold.top_movers", mode="append")
+        logger.info("Writing rolling_volatility_7d...")
+        write_postgres(rolling_volatility, "gold.rolling_volatility_7d", mode="append")
+        logger.info("Writing news_volume_per_coin...")
+        write_postgres(news_volume, "gold.news_volume_per_coin", mode="append")
 
         duration = time.time() - started
         logger.info("Gold job complete in %.2fs", duration)

@@ -11,6 +11,9 @@ pyspark==3.5.1
 # Gold — sentiment
 vaderSentiment==3.3.2
 
+# Silver — approximate dedup
+datasketch==1.6.4
+
 # Gold — Postgres write
 psycopg2-binary==2.9.9
 

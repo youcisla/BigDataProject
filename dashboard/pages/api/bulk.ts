@@ -13,7 +13,7 @@ async function resolveBulkPath(): Promise<string> {
   const envPath = process.env.REDDIT_BULK_PATH;
   if (envPath && fsSync.existsSync(envPath)) return envPath;
 
-  // 2. active dataset file
+  // 2. active dataset file (set by dashboard upload or select)
   try {
     const raw = (await fs.readFile(ACTIVE_FILE, "utf-8")).trim();
     if (raw) {
@@ -24,7 +24,7 @@ async function resolveBulkPath(): Promise<string> {
     // ignore
   }
 
-  // 3. most recently uploaded in data/dumps/
+  // 3. most recently uploaded CSV in data/dumps/
   try {
     const entries = await fs.readdir(DUMPS_DIR);
     const files = entries.filter((n) => !n.startsWith("."));
@@ -36,7 +36,7 @@ async function resolveBulkPath(): Promise<string> {
     // ignore
   }
 
-  // 4. fallback
+  // 4. fallback (legacy default)
   return "data/reddit_opinion_PSE_ISR.csv";
 }
 
@@ -44,7 +44,7 @@ export default async function handler(_req: NextApiRequest, res: NextApiResponse
   const bulkPath = await resolveBulkPath();
   const job = startJob(
     process.platform === "win32" ? "python" : "python3",
-    ["scripts/fetch_reddit.py", "--bulk-path", bulkPath],
+    ["scripts/fetch_stocks.py", "--tickers-file", bulkPath],
     "bulk"
   );
   res.status(202).json({ jobId: job.id, status: job.status, startedAt: job.startedAt, bulkPath });
