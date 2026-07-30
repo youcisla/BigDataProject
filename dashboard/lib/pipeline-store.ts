@@ -80,7 +80,7 @@ export const usePipelineStore = create<PipelineStore>()(
     setJobs: (jobsList) => {
       const next: Record<Cmd, JobState | null> = { bulk: null, transform: null, load: null };
       for (const j of jobsList) {
-        if (j.args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto") || a.includes("fetch_news") || a.includes("fetch_reddit"))) next.bulk = j;
+        if (j.args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto"))) next.bulk = j;
         else if (j.args.some((a) => a.includes("silver_transform"))) next.transform = j;
         else if (j.args.some((a) => a.includes("gold_kpis"))) next.load = j;
       }
@@ -105,7 +105,7 @@ if (CHANNEL) {
     } else if (key === "jobs") {
       const next: Record<Cmd, JobState | null> = { bulk: null, transform: null, load: null };
       for (const j of payload as JobState[]) {
-        if (j.args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto") || a.includes("fetch_news") || a.includes("fetch_reddit"))) next.bulk = j;
+        if (j.args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto"))) next.bulk = j;
         else if (j.args.some((a) => a.includes("silver_transform"))) next.transform = j;
         else if (j.args.some((a) => a.includes("gold_kpis"))) next.load = j;
       }

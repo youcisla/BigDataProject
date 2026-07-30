@@ -1,5 +1,4 @@
-# Bronze layer — Reddit + NewsAPI ingestion
-praw==7.8.1
+# Bronze layer — archive ingestion (stocks/ETF OHLCV, crypto OHLCV + headlines)
 requests==2.32.3
 
 # HDFS client (used by scripts/upload_to_hdfs.py)
@@ -8,10 +7,7 @@ hdfs[kerberos]==2.7.3
 # Silver + Gold — Spark ETL
 pyspark==3.5.1
 
-# Gold — sentiment
-vaderSentiment==3.3.2
-
-# Silver — approximate dedup
+# Silver — approximate dedup (MinHash + LSH)
 datasketch==1.6.4
 
 # Gold — Postgres write

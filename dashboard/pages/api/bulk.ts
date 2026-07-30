@@ -3,49 +3,63 @@ import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { startJob } from "../../lib/jobs";
+import { pythonCmd } from "../../lib/exec";
 
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
 const DUMPS_DIR = path.resolve(PROJECT_ROOT, "data", "dumps");
 const ACTIVE_FILE = path.resolve(DUMPS_DIR, ".active");
 
-async function resolveBulkPath(): Promise<string> {
-  // 1. env var wins
-  const envPath = process.env.REDDIT_BULK_PATH;
-  if (envPath && fsSync.existsSync(envPath)) return envPath;
+const STOCKS_DIR = process.env.STOCKS_DIR ?? "data/Stocks";
+const ETFS_DIR = process.env.ETFS_DIR ?? "data/ETFs";
 
-  // 2. active dataset file (set by dashboard upload or select)
+/**
+ * Optional ticker allow-list: one symbol per line.
+ *
+ * This used to resolve to the uploaded bulk *dataset* and hand it to
+ * `--tickers-file`, which reads every line as a ticker symbol — so a
+ * multi-GB OHLCV CSV was parsed as millions of bogus symbols and matched
+ * nothing. Only accept a small, plausible ticker list here.
+ */
+const MAX_TICKER_FILE_BYTES = 64 * 1024;
+
+async function resolveTickersFile(): Promise<string | null> {
+  const candidates: string[] = [];
+
+  if (process.env.TICKERS_FILE) candidates.push(process.env.TICKERS_FILE);
+
   try {
     const raw = (await fs.readFile(ACTIVE_FILE, "utf-8")).trim();
-    if (raw) {
-      const full = path.isAbsolute(raw) ? raw : path.resolve(PROJECT_ROOT, raw);
-      if (fsSync.existsSync(full)) return full;
-    }
+    if (raw) candidates.push(path.isAbsolute(raw) ? raw : path.resolve(PROJECT_ROOT, raw));
   } catch {
-    // ignore
+    // no active dataset selected
   }
 
-  // 3. most recently uploaded CSV in data/dumps/
-  try {
-    const entries = await fs.readdir(DUMPS_DIR);
-    const files = entries.filter((n) => !n.startsWith("."));
-    if (files.length > 0) {
-      files.sort();
-      return path.join(DUMPS_DIR, files[files.length - 1]);
-    }
-  } catch {
-    // ignore
+  for (const candidate of candidates) {
+    if (!fsSync.existsSync(candidate)) continue;
+    const stat = await fs.stat(candidate);
+    if (stat.isFile() && stat.size <= MAX_TICKER_FILE_BYTES) return candidate;
   }
-
-  // 4. fallback (legacy default)
-  return "data/reddit_opinion_PSE_ISR.csv";
+  return null;
 }
 
 export default async function handler(_req: NextApiRequest, res: NextApiResponse) {
-  const bulkPath = await resolveBulkPath();
-  const job = startJob(
-    process.platform === "win32" ? "python" : "python3",
-    ["scripts/fetch_stocks.py", "--tickers-file", bulkPath],
-    "bulk"
-  );
-  res.status(202).json({ jobId: job.id, status: job.status, startedAt: job.startedAt, bulkPath });
+  if (!fsSync.existsSync(path.resolve(PROJECT_ROOT, STOCKS_DIR))) {
+    res.status(400).json({
+      error: `stocks directory not found: ${STOCKS_DIR}. Extract the Kaggle OHLCV archive there, or set STOCKS_DIR.`,
+    });
+    return;
+  }
+
+  const args = ["scripts/fetch_stocks.py", "--folder", STOCKS_DIR, "--folder", ETFS_DIR];
+  const tickersFile = await resolveTickersFile();
+  if (tickersFile) args.push("--tickers-file", tickersFile);
+
+  const job = startJob(pythonCmd(), args, "bulk");
+  res.status(202).json({
+    jobId: job.id,
+    status: job.status,
+    startedAt: job.startedAt,
+    folders: [STOCKS_DIR, ETFS_DIR],
+    tickersFile,
+  });
 }

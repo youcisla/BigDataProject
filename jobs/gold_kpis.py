@@ -21,16 +21,11 @@ Run via spark-submit inside spark-master container:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
-import json
 import logging
 import os
-import sys
 import time
-from typing import Iterable
 
-from pyspark.sql import SparkSession, functions as F, types as T, Window
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from pyspark.sql import SparkSession, functions as F, Window
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,7 +54,34 @@ def read_silver(spark: SparkSession):
     return spark.read.parquet(SILVER_BASE)
 
 
-def write_postgres(df, table: str, mode: str = "append") -> None:
+def truncate_table(spark: SparkSession, table: str) -> None:
+    """Empty a Gold table, keeping its DDL.
+
+    Spark's own `.mode("overwrite")` cannot be used here. With
+    `truncate=false` it DROPs the table and recreates it from the DataFrame
+    schema, losing the primary keys, RANGE partitioning, and indexes declared
+    in sql/gold_schema.sql. With `truncate=true` it still drops, because
+    Spark's PostgresDialect reports TRUNCATE as cascading and refuses it.
+
+    So issue the TRUNCATE ourselves over the JDBC driver the JVM already has
+    (pulled in by --packages), then append.
+    """
+    jvm = spark._jvm  # noqa: SLF001 - py4j gateway is the documented access path
+    props = jvm.java.util.Properties()
+    props.setProperty("user", PG_USER)
+    props.setProperty("password", PG_PASS)
+    conn = jvm.java.sql.DriverManager.getConnection(PG_URL, props)
+    try:
+        stmt = conn.createStatement()
+        stmt.execute(f"TRUNCATE TABLE {table}")
+        stmt.close()
+    finally:
+        conn.close()
+
+
+def write_postgres(spark: SparkSession, df, table: str) -> None:
+    """Replace a Gold table's contents. Idempotent: safe to re-run `make load`."""
+    truncate_table(spark, table)
     # Cast date column to DATE so Postgres accepts it (Silver stores dates as strings)
     casted = df.withColumn("date", F.col("date").cast("date"))
     (
@@ -69,24 +91,45 @@ def write_postgres(df, table: str, mode: str = "append") -> None:
         .option("user", PG_USER)
         .option("password", PG_PASS)
         .option("driver", "org.postgresql.Driver")
-        .mode(mode)
+        .mode("append")
         .save()
     )
 
 
 def compute_daily_prices(silver):
-    """Latest close per (date, ticker, source)."""
+    """OHLCV per (date, ticker, source). Matches the daily_prices primary key.
+
+    Aggregates are deterministic (max/min/sum, not first) because Bronze can
+    carry more than one row per key and `first` would depend on shuffle order.
+    """
     return (
         silver.filter(F.col("source_type") != F.lit("crypto_news"))
         .filter(F.col("close").isNotNull())
         .groupBy("date", "ticker", "source")
-        .agg(F.first("open").alias("open"),
+        .agg(F.max("open").alias("open"),
              F.max("high").alias("high"),
              F.min("low").alias("low"),
-             F.first("close").alias("close"),
+             F.max("close").alias("close"),
              F.sum("volume").alias("volume"))
         .withColumn("updated_at", F.current_timestamp())
         .select("date", "ticker", "source", "open", "high", "low", "close", "volume", "updated_at")
+    )
+
+
+def collapse_to_one_source(daily_prices):
+    """One row per (date, ticker), picking a stable source.
+
+    daily_prices is keyed on (date, ticker, source), but daily_returns and
+    everything downstream of it is keyed on (date, ticker) only. A ticker
+    present in two sources would otherwise produce two rows per day — a
+    primary-key violation on load, and a lag() that alternates between
+    sources and reports garbage returns.
+    """
+    w = Window.partitionBy("date", "ticker").orderBy(F.col("source").asc())
+    return (
+        daily_prices.withColumn("_rank", F.row_number().over(w))
+        .filter(F.col("_rank") == 1)
+        .drop("_rank")
     )
 
 
@@ -95,7 +138,8 @@ def compute_daily_returns(daily_prices):
     w = Window.partitionBy("ticker").orderBy("date")
     prev = F.lag("close").over(w)
     return (
-        daily_prices.withColumn("prev_close", prev)
+        collapse_to_one_source(daily_prices)
+        .withColumn("prev_close", prev)
         .filter(F.col("prev_close").isNotNull())
         .withColumn("return_pct", ((F.col("close") - F.col("prev_close")) / F.col("prev_close")) * F.lit(100))
         .withColumn("updated_at", F.current_timestamp())
@@ -178,15 +222,15 @@ def main() -> int:
         news_volume = compute_news_volume_per_coin(silver)
 
         logger.info("Writing daily_prices...")
-        write_postgres(daily_prices, "gold.daily_prices", mode="append")
+        write_postgres(spark, daily_prices, "gold.daily_prices")
         logger.info("Writing daily_returns...")
-        write_postgres(daily_returns, "gold.daily_returns", mode="append")
+        write_postgres(spark, daily_returns, "gold.daily_returns")
         logger.info("Writing top_movers...")
-        write_postgres(top_movers, "gold.top_movers", mode="append")
+        write_postgres(spark, top_movers, "gold.top_movers")
         logger.info("Writing rolling_volatility_7d...")
-        write_postgres(rolling_volatility, "gold.rolling_volatility_7d", mode="append")
+        write_postgres(spark, rolling_volatility, "gold.rolling_volatility_7d")
         logger.info("Writing news_volume_per_coin...")
-        write_postgres(news_volume, "gold.news_volume_per_coin", mode="append")
+        write_postgres(spark, news_volume, "gold.news_volume_per_coin")
 
         duration = time.time() - started
         logger.info("Gold job complete in %.2fs", duration)

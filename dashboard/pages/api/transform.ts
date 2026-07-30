@@ -9,8 +9,6 @@ export default function handler(_req: NextApiRequest, res: NextApiResponse) {
       "compose",
       "exec",
       "-T",
-      "-e",
-      "HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop",
       "spark-master",
       "spark-submit",
       "--master",

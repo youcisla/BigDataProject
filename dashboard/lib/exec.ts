@@ -39,11 +39,15 @@ export function runExec(cmd: string, args: string[], timeoutMs = 30 * 1000): Exe
   }
 }
 
-/** Async variant for streaming-friendly calls. */
-export function runExecAsync(cmd: string, args: string[]): Promise<ExecResult> {
+/**
+ * Async variant. Prefer this in API routes: runExec blocks Node's event loop,
+ * which stalls every other in-flight request for the duration of the command.
+ */
+export function runExecAsync(cmd: string, args: string[], timeoutMs = 30 * 1000): Promise<ExecResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    execFile(cmd, args, { cwd: PROJECT_ROOT, encoding: "utf-8", windowsHide: true }, (err, stdout, stderr) => {
+    const opts = { cwd: PROJECT_ROOT, encoding: "utf-8" as const, timeout: timeoutMs, windowsHide: true };
+    execFile(cmd, args, opts, (err, stdout, stderr) => {
       if (err) {
         const e = err as { stdout?: string; stderr?: string; code?: number };
         resolve({
@@ -61,11 +65,11 @@ export function runExecAsync(cmd: string, args: string[]): Promise<ExecResult> {
 }
 
 /** Resolve the python executable. Windows prefers `python`, Unix `python3`. */
-function pythonCmd(): string {
+export function pythonCmd(): string {
   return IS_WINDOWS ? "python" : "python3";
 }
 
 /** Resolve the docker executable. */
-function dockerCmd(): string {
+export function dockerCmd(): string {
   return IS_WINDOWS ? "docker.exe" : "docker";
 }

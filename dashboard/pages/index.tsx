@@ -651,7 +651,7 @@ export default function Home() {
 }
 
 function jobCmdLabel(cmd: string, args: string[]): string {
-  if (args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto") || a.includes("fetch_news") || a.includes("fetch_reddit"))) return "Bulk";
+  if (args.some((a) => a.includes("fetch_stocks") || a.includes("fetch_crypto"))) return "Bulk";
   if (args.some((a) => a.includes("silver_transform"))) return "Transform";
   if (args.some((a) => a.includes("gold_kpis"))) return "Load";
   return `${cmd} ${args.slice(0, 2).join(" ")}`;

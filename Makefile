@@ -1,5 +1,5 @@
 .PHONY: help up init-hdfs down reset logs ps status \
-        bulk ingest-news transform load demo monitor test clean ui
+        bulk crypto transform load demo monitor test clean ui
 
 COMPOSE = docker compose
 SPARK_SERVICE = spark-master
@@ -17,11 +17,11 @@ help:
 	@echo ""
 	@echo "Data:"
 	@echo "  make init-hdfs       Create /data/{bronze,silver,gold} directories on HDFS"
-	@echo "  make bulk            Reddit bulk dump (REDDIT_BULK_PATH) -> HDFS Bronze"
-	@echo "  make ingest-news     NewsAPI headlines -> HDFS Bronze"
+	@echo "  make bulk            Stocks + ETF OHLCV archives -> HDFS Bronze"
+	@echo "  make crypto          Crypto OHLCV + news headlines -> HDFS Bronze"
 	@echo "  make transform       Silver: HDFS Bronze JSON -> HDFS Silver Parquet"
 	@echo "  make load            Gold: HDFS Silver -> Postgres KPIs"
-	@echo "  make demo            up + init-hdfs + bulk + transform + load"
+	@echo "  make demo            up + init-hdfs + bulk + crypto + transform + load"
 	@echo ""
 	@echo "Monitoring:"
 	@echo "  make monitor         Print Grafana + Prometheus URLs"
@@ -52,45 +52,48 @@ ps status:
 
 init-hdfs:
 	@echo "Creating HDFS directories..."
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop namenode hdfs dfs -mkdir -p /data/bronze/reddit
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop namenode hdfs dfs -mkdir -p /data/bronze/news
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop namenode hdfs dfs -mkdir -p /data/silver
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop namenode hdfs dfs -mkdir -p /data/gold
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/stocks
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/crypto_bulk
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/crypto_news
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/silver
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/gold
 	@echo "Done."
 
+# STOCKS_DIR / ETFS_DIR hold the *.us.txt OHLCV files from the Kaggle archive.
+STOCKS_DIR ?= data/Stocks
+ETFS_DIR   ?= data/ETFs
+CRYPTO_DIR ?= data
+
 bulk:
-	@if [ -z "$$STOCKS_BULK_PATH" ]; then \
-		echo "ERROR: STOCKS_BULK_PATH env var not set. Point it to a Kaggle stocks CSV."; \
-		echo "Download: https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs"; \
+	@if [ ! -d "$(STOCKS_DIR)" ]; then \
+		echo "ERROR: $(STOCKS_DIR) not found."; \
+		echo "Download and extract: https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs"; \
+		echo "Override the location with: make bulk STOCKS_DIR=... ETFS_DIR=..."; \
 		exit 1; \
 	fi
-	@echo "Loading stocks dump from $$STOCKS_BULK_PATH ..."
-	STOCKS_BULK_PATH=$$STOCKS_BULK_PATH python scripts/fetch_stocks.py --csv $$STOCKS_BULK_PATH
+	python scripts/fetch_stocks.py --folder $(STOCKS_DIR) --folder $(ETFS_DIR)
 
-crypto-live:
-	python scripts/fetch_crypto.py --folder data
-
-ingest-news:
-	@echo "News is bundled with crypto OHLCV in the same CSV files. Run 'make crypto-live' to ingest both."
+crypto:
+	python scripts/fetch_crypto.py --folder $(CRYPTO_DIR)
 
 transform:
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop $(SPARK_SERVICE) \
+	$(COMPOSE) exec -T $(SPARK_SERVICE) \
 		spark-submit --master spark://spark-master:7077 --deploy-mode client \
 		/opt/spark/jobs/silver_transform.py --date $$(date -u +%Y-%m-%d)
 
 load:
-	$(COMPOSE) exec -T -e HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop $(SPARK_SERVICE) \
+	$(COMPOSE) exec -T $(SPARK_SERVICE) \
 		spark-submit --master spark://spark-master:7077 --deploy-mode client \
 		--packages org.postgresql:postgresql:42.7.3 \
 		/opt/spark/jobs/gold_kpis.py
 
-demo: up init-hdfs bulk transform load
+demo: up init-hdfs bulk crypto transform load
 	@echo ""
 	@echo "=== Demo complete ==="
 	@echo "Grafana:    http://localhost:3000 (admin / admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo "HDFS UI:    http://localhost:9870"
-	@echo "Spark UI:   http://localhost:8080"
+	@echo "Spark UI:   http://localhost:8088"
 	@echo "cAdvisor:   http://localhost:8081"
 	@echo "Postgres:   localhost:5432 (gold / gold / gold)"
 

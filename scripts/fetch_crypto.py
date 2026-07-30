@@ -144,27 +144,32 @@ def main() -> int:
     ensure_directory(f"/data/bronze/crypto_bulk/{args.ohlcv_date}")
     ensure_directory(f"/data/bronze/crypto_news/{args.news_date}")
 
-    def all_rows():
-        ohlcv_count = 0
-        news_count = 0
+    def ohlcv_rows():
         for path in files:
             ticker = ticker_from_filename(path)
             source = f"cryptodatadownload_{ticker.lower()}"
             for row in stream_csv(path):
                 normalized = {k.lower(): v for k, v in row.items() if k}
                 yield normalize_ohlcv_row(normalized, ticker, source)
-                ohlcv_count += 1
-                date = normalized.get("begins_at")
-                articles = safe_parse_articles(normalized.get("articles"))
-                for headline in articles:
-                    yield normalize_news_row(ticker, headline, date, source)
-                    news_count += 1
-            logger.info("  %s: parsed", path.name)
-        logger.info("Total rows: %d OHLCV + %d news", ohlcv_count, news_count)
+            logger.info("  %s: OHLCV parsed", path.name)
 
-    count = upload_json_lines(all_rows(), ohlcv_target)
-    logger.info("Bronze crypto_bulk done: %d records at %s", count, ohlcv_target)
-    logger.info("Bronze crypto_news skipped (already written into OHLCV file as separate record type)")
+    def news_rows():
+        for path in files:
+            ticker = ticker_from_filename(path)
+            source = f"cryptodatadownload_{ticker.lower()}"
+            for row in stream_csv(path):
+                normalized = {k.lower(): v for k, v in row.items() if k}
+                date = normalized.get("begins_at")
+                for headline in safe_parse_articles(normalized.get("articles")):
+                    yield normalize_news_row(ticker, headline, date, source)
+            logger.info("  %s: headlines parsed", path.name)
+
+    # Two separate Bronze partitions, one per source_type. The Silver job and
+    # the dashboard both address these by path, so they must not be merged.
+    ohlcv_count = upload_json_lines(ohlcv_rows(), ohlcv_target)
+    logger.info("Bronze crypto_bulk done: %d records at %s", ohlcv_count, ohlcv_target)
+    news_count = upload_json_lines(news_rows(), news_target)
+    logger.info("Bronze crypto_news done: %d records at %s", news_count, news_target)
     return 0
 
 

@@ -242,8 +242,9 @@ export default function SymbolPage() {
                   News headlines: embedded in the same CryptoDataDownload CSV (column <code className="font-mono text-xs">articles</code>).
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Scope: 5 stocks (AAPL, MSFT, GOOGL, AMZN, TSLA) and 9 cryptos (BTC, ETH, ADA, SOL, AVAX, MATIC, UNI, LTC, SHIB).
-                  Extension: ingest more tickers by adding them to <code className="font-mono text-xs">data/test_tickers.txt</code> and re-running the pipeline.
+                  Scope: every ticker present in the ingested archives. Restrict a run by passing
+                  a <code className="font-mono text-xs">--tickers-file</code> (one symbol per line)
+                  to <code className="font-mono text-xs">scripts/fetch_stocks.py</code>.
                 </p>
                 <p className="text-xs text-muted-foreground">
                   What's NOT included: fundamentals (P/E, EPS), real-time prices, analyst ratings, SEC filings.

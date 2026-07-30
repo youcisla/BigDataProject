@@ -142,7 +142,7 @@ export function DatasetsPanel() {
           <Database className="h-5 w-5" /> Datasets
         </CardTitle>
         <CardDescription>
-          Upload a Reddit CSV/ZST dump. The active one is used by the Bulk pipeline step.
+          Upload a ticker list (one symbol per line). The active one restricts which symbols the Bulk step ingests.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

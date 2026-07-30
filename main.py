@@ -25,23 +25,34 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def run_bronze(args) -> int:
-    """Run Bronze ingestion: Reddit bulk dump + NewsAPI → HDFS."""
+    """Run Bronze ingestion: stocks/ETF OHLCV + crypto OHLCV & headlines → HDFS."""
     logger.info("=== Bronze layer ===")
     env = os.environ.copy()
     if args.date:
         env["BRONZE_DATE"] = args.date
 
-    if not args.skip_reddit:
-        cmd = [sys.executable, "scripts/fetch_reddit.py"]
-        if args.bulk_path:
-            cmd += ["--bulk-path", args.bulk_path]
+    if not args.skip_stocks:
+        cmd = [sys.executable, "scripts/fetch_stocks.py", "--date", args.date]
+        for folder in args.stocks_folder:
+            cmd += ["--folder", folder]
+        if args.tickers_file:
+            cmd += ["--tickers-file", args.tickers_file]
         logger.info("Running: %s", " ".join(cmd))
         result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env)
         if result.returncode != 0:
             return result.returncode
 
-    if not args.skip_newsapi:
-        cmd = [sys.executable, "scripts/fetch_newsapi.py"]
+    if not args.skip_crypto:
+        cmd = [
+            sys.executable,
+            "scripts/fetch_crypto.py",
+            "--folder",
+            args.crypto_folder,
+            "--ohlcv-date",
+            args.date,
+            "--news-date",
+            args.date,
+        ]
         logger.info("Running: %s", " ".join(cmd))
         result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env)
         if result.returncode != 0:
@@ -61,7 +72,7 @@ def run_silver(args) -> int:
         "spark-master",
         "spark-submit",
         "--master",
-        "spark-master:7077",
+        "spark://spark-master:7077",
         "--deploy-mode",
         "client",
         "/opt/spark/jobs/silver_transform.py",
@@ -83,7 +94,7 @@ def run_gold(args) -> int:
         "spark-master",
         "spark-submit",
         "--master",
-        "spark-master:7077",
+        "spark://spark-master:7077",
         "--deploy-mode",
         "client",
         "--packages",
@@ -110,14 +121,27 @@ def main() -> int:
         help="Partition date (YYYY-MM-DD). Defaults to today UTC.",
     )
     parser.add_argument(
-        "--bulk-path",
-        default=os.environ.get("REDDIT_BULK_PATH"),
-        help="Path to Reddit bulk dump CSV/ZST (overrides REDDIT_BULK_PATH env).",
+        "--stocks-folder",
+        action="append",
+        default=None,
+        help="Folder(s) holding *.us.txt OHLCV files. Repeatable. Default: data/Stocks data/ETFs.",
     )
-    parser.add_argument("--skip-reddit", action="store_true", help="Skip Reddit ingestion.")
-    parser.add_argument("--skip-newsapi", action="store_true", help="Skip NewsAPI ingestion.")
+    parser.add_argument(
+        "--crypto-folder",
+        default="data",
+        help="Folder holding per-coin CryptoDataDownload CSVs. Default: data.",
+    )
+    parser.add_argument(
+        "--tickers-file",
+        default=os.environ.get("TICKERS_FILE"),
+        help="File with one ticker per line, to restrict stock ingestion.",
+    )
+    parser.add_argument("--skip-stocks", action="store_true", help="Skip stock/ETF ingestion.")
+    parser.add_argument("--skip-crypto", action="store_true", help="Skip crypto OHLCV + news ingestion.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+    if not args.stocks_folder:
+        args.stocks_folder = ["data/Stocks", "data/ETFs"]
 
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
 

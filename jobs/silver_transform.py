@@ -19,13 +19,20 @@ import argparse
 import json
 import logging
 import re
+import sys
 import time
+from functools import reduce
+from pathlib import Path
 from typing import Iterable
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.window import Window
 
-from jobs.silver_utils import build_schema
+# spark-submit puts this file's own directory on sys.path, not the project
+# root, so `jobs.silver_utils` is not importable without help.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from jobs.silver_utils import build_schema  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,6 +52,9 @@ def build_spark() -> SparkSession:
         .master("spark://spark-master:7077")
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
+        # Dynamic overwrite replaces only the partitions present in this run.
+        # Static (the default) would delete every prior date under /data/silver.
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .getOrCreate()
     )
 
@@ -62,7 +72,7 @@ def load_bronze(spark: SparkSession, date_str: str):
             logger.warning("No Bronze data for %s/%s: %s", source, date_str, exc)
     if not frames:
         return None
-    return frames[0] if len(frames) == 1 else frames[0].unionByName(frames[1])
+    return reduce(lambda a, b: a.unionByName(b), frames)
 
 
 def count_nulls(df, columns):

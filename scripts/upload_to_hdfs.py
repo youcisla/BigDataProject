@@ -13,13 +13,23 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 PROGRESS_EVERY = 1000
+
+
+def _local_fallback(hdfs_path: str) -> str:
+    """Where a record file lands when HDFS is unreachable.
+
+    Hardcoding /tmp broke on Windows hosts, which the README supports for
+    running the ingestion scripts. gettempdir() resolves correctly on both.
+    """
+    root = Path(os.environ.get("BRONZE_LOCAL_FALLBACK") or tempfile.gettempdir())
+    return str(root / hdfs_path.lstrip("/\\"))
 
 
 def _hdfs_client():
@@ -57,7 +67,7 @@ def upload_json_lines(
     last_id: Optional[str] = None
 
     if client is None:
-        target = str(Path("/tmp") / hdfs_path.lstrip("/"))
+        target = _local_fallback(hdfs_path)
 
     Path(target).parent.mkdir(parents=True, exist_ok=True)
 
@@ -79,7 +89,8 @@ def upload_json_lines(
             logger.warning("HDFS upload failed for %s: %s (kept local copy)", hdfs_path, exc)
 
     _emit_progress(count, last_id, final=True)
-    logger.info("Wrote %d records to %s", count, hdfs_path)
+    # Report where the data actually landed, not where we wanted it to land.
+    logger.info("Wrote %d records to %s", count, target)
     return count
 
 
@@ -93,7 +104,7 @@ def ensure_directory(hdfs_path: str) -> None:
     """Create an HDFS directory (and parents) if it does not exist."""
     client = _hdfs_client()
     if client is None:
-        Path("/tmp" + hdfs_path).mkdir(parents=True, exist_ok=True)
+        Path(_local_fallback(hdfs_path)).mkdir(parents=True, exist_ok=True)
         return
     try:
         client.makedirs(hdfs_path)
