@@ -8,7 +8,7 @@
 
 ## 1. Présentation
 
-Plateforme data lake + warehouse suivant l'architecture Medallion (Bronze → Silver → Gold). Ingestion automatisée de données mixtes (structurées et non structurées) depuis **Kaggle US stocks OHLCV** (archive bulk) + **CoinGecko live crypto API** + **Kaggle crypto news headlines**. Transformations distribuées via Apache Spark sur cluster Docker (1 worker par défaut, scalable via `--scale`). KPIs financiers exposés dans PostgreSQL, supervisés via Grafana + Prometheus + cAdvisor.
+Plateforme data lake + warehouse suivant l'architecture Medallion (Bronze → Silver → Gold). Ingestion automatisée de données mixtes (structurées et non structurées) depuis une **archive US stocks/ETF OHLCV** + des **CSV crypto** (OHLCV + headlines) + l'**API live CoinGecko**. Transformations distribuées via Apache Spark sur cluster Docker (1 worker par défaut, scalable via `--scale`). KPIs financiers exposés dans PostgreSQL, supervisés via Grafana + Prometheus + cAdvisor.
 
 Objectif métier : **veille financière** corrélant cours boursiers, retours quotidiens et volume de news crypto pour détecter mouvements anormaux.
 
@@ -19,20 +19,20 @@ Objectif métier : **veille financière** corrélant cours boursiers, retours qu
 ```mermaid
 flowchart LR
     subgraph Sources["Sources"]
-        A["Kaggle Stocks CSV (5+ GB)"]
+        A["Archive Stocks/ETF (~5 Go)"]
         B["CoinGecko API (live)"]
-        C["Kaggle Crypto News CSV"]
+        C["CSV crypto (OHLCV + articles)"]
     end
 
     subgraph Bronze["Bronze — HDFS brut"]
-        BA["bronze/stocks/YYYY/MM/DD"]
-        BB["bronze/crypto_live/YYYY/MM/DD"]
-        BC["bronze/crypto_news/YYYY/MM/DD"]
+        BA["bronze/stocks/DATE"]
+        BB["bronze/crypto_live/DATE"]
+        BC["bronze/crypto_bulk + crypto_news/DATE"]
     end
 
     subgraph Spark["Spark cluster (1 master + N workers)"]
         S1["Silver: schema + dedup exact + MinHash/LSH"]
-        S2["Gold: returns + volatility + movers + news volume"]
+        S2["Gold: returns + volatility + movers + news volume + headlines"]
     end
 
     SV["silver/ (Parquet, partitionné par source_type + date)"]
@@ -70,56 +70,60 @@ Les flèches pleines portent les données : Sources → Bronze HDFS → Spark Si
 | Exigence (docx) | Couverture | Localisation |
 |---|---|---|
 | Bronze / Silver / Gold | OK | `scripts/fetch_*.py` (Bronze) + `jobs/silver_transform.py` + `jobs/gold_kpis.py` |
-| 5 Go+ données mixtes | OK | Kaggle US stocks OHLCV (bulk) + Kaggle crypto news headlines |
-| Structuré + non structuré | OK | OHLCV (structuré) + news headlines (non structuré) |
-| Fetch automatisé via API | OK | `scripts/fetch_crypto_live.py` (CoinGecko, cron) + `scripts/fetch_stocks.py` (Kaggle bulk) |
+| 5 Go+ données mixtes | OK | Archive US stocks/ETF OHLCV (~5 Go extraits) + headlines crypto |
+| Structuré + non structuré | OK | OHLCV (structuré) + `headline` texte libre (non structuré) |
+| Fetch automatisé via API | OK | `scripts/fetch_crypto_live.py` (CoinGecko, sans clé, cron-friendly) |
 | Spark non local | OK | Cluster Docker : 1 master + N workers (défaut 1, scalable via `--scale`) |
 | Workers logiques | OK | `docker compose up --scale spark-worker=N` |
-| Aucune configuration manuelle | OK | `.env` + YAML, aucun `.sh` |
-| Monitoring Grafana | OK | `monitoring/grafana/dashboards/` (1 dashboard, 6-8 panels) |
-| Métriques par couche | OK | Bronze (records, durée), Silver (nulls, invalides, doublons exacts + approx), Gold (retours, volatilité, lignes chargées) |
-| Prometheus + métriques système | OK | `monitoring/prometheus.yml` + `cadvisor` (docker stats, remplace node-exporter) |
-| PostgreSQL pour Gold | OK | Service `postgres` dans `docker-compose.yml` |
-| HDFS | OK | Services `namenode` + `datanode` (apache/hadoop image) |
-| Docker Compose + Makefile | OK | `docker-compose.yml` + `Makefile` (up/down/bulk/crypto-live/ingest-news/transform/load/monitor/demo/test/reset) |
+| Aucune configuration manuelle | OK | `.env` + YAML + Makefile, aucun `.sh` |
+| Monitoring Grafana | OK | `monitoring/grafana/dashboards/` (1 dashboard unifié) |
+| Métriques par couche | OK | Bronze (records, durée), Silver (nulls, invalides, doublons exacts + approx), Gold (lignes écrites, durée) |
+| Prometheus + métriques système | OK | `monitoring/prometheus.yml` + `cadvisor` (remplace Node Exporter) |
+| PostgreSQL pour Gold | OK | Service `postgres` + `sql/gold_schema.sql` (6 tables) |
+| HDFS | OK | Services `namenode` + `datanode` (apache/hadoop 3.4.1) |
+| Docker Compose + Makefile | OK | `docker-compose.yml` + `Makefile` |
 
----
+### Résultats du dernier run vérifié
+
+Sous-ensemble de 60 tickers actions/ETF + 9 cryptos (le pipeline complet accepte les ~7000 tickers de l'archive) :
+
+| Couche | Volume |
+|---|---|
+| Bronze | 262 367 records sur 4 partitions (`stocks`, `crypto_bulk`, `crypto_live`, `crypto_news`) |
+| Silver | 241 533 records (311 doublons exacts, 20 523 quasi-doublons MinHash/LSH, 0 invalide) |
+| Gold | 170 231 `daily_prices` · 170 163 `daily_returns` · 145 916 `top_movers` · 170 027 `rolling_volatility_7d` · 9 980 `news_volume_per_coin` · 18 000 `news_headlines` |
+
+`make load` est idempotent : chaque table Gold est vidée (TRUNCATE) puis réécrite, donc relancer le job ne duplique rien et ne viole aucune clé primaire.
 
 ## 3. Sources de données
 
-### Sources principales
-
-| Source | Type | Structuré | Non structuré | Volume visé |
+| Source | Type | Structuré | Non structuré | Partition Bronze |
 |---|---|---|---|---|
-| **Kaggle US Stocks OHLCV** | Archive CSV | ticker, date, open/high/low/close, volume | — | 5+ Go (1 chargement) |
-| **CoinGecko API** | Live REST | date, ticker, close, volume | — | 10k calls/mois |
-| **Kaggle Crypto News** | Archive CSV | date, ticker, source, URL | headline | ~50 Mo (1 chargement) |
+| **US Stocks + ETF OHLCV** | Archive `*.us.txt` | ticker, date, open/high/low/close, volume | — | `bronze/stocks/` |
+| **Crypto OHLCV (archive)** | CSV par coin | ticker, date, open/high/low/close | — | `bronze/crypto_bulk/` |
+| **CoinGecko API** | REST live | ticker, date, OHLC | — | `bronze/crypto_live/` |
+| **Crypto news headlines** | Colonne `articles` des CSV crypto | date, ticker, source | headline | `bronze/crypto_news/` |
 
-**Total attendu : > 5 Go** (bulk) + flux live cumulé.
+### Détail
 
-### Sources complémentaires
-
-- **Kaggle "Huge Stock Market Dataset" (borismarjanovic).** Historique quotidien OHLCV pour ~7000 actions et ETF US depuis 1962. ~5 Go compressé. Bulk unique via `scripts/fetch_stocks.py`.
-- **CoinGecko API.** Flux live quotidien BTC/ETH/top coins via `/coins/{id}/market_chart`. Free tier, no key, 10-30 calls/min. Couvre l'exigence « fetch automatisé via API ».
-- **Kaggle "Crypto News Headlines & Market Prices by Date" (aaroncbastian).** Headlines cryptos (non structuré) + prix daily (structuré) joints par date. Bulk unique via `scripts/fetch_news.py`.
+- **Archive actions/ETF (Kaggle, borismarjanovic).** Historique quotidien OHLCV pour ~7000 actions et ETF US. ~5 Go une fois extrait, un fichier `*.us.txt` par ticker. Chargé par `scripts/fetch_stocks.py`.
+  URL : https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs
+- **CSV crypto (format CryptoDataDownload).** Un fichier par coin (`data/BTC.csv`, `data/ETH.csv`, …) avec les colonnes `begins_at, open_price, close_price, high_price, low_price, symbol, articles`. La colonne `articles` contient une liste de titres d'articles : `scripts/fetch_crypto.py` la décompose en enregistrements `crypto_news` distincts. C'est la source non structurée du projet.
+- **CoinGecko API.** `scripts/fetch_crypto_live.py` appelle `/coins/{id}/ohlc` (free tier, sans clé, 10-30 appels/min) pour BTC, ETH, SOL, ADA, AVAX, LTC. Couvre l'exigence « fetch automatisé via API » et se planifie par cron.
 
 ### Justification du choix (option 11 du cahier des charges)
 
-L'option 11 (Trading/Crypto) coche toutes les cases du brief :
-
-- **Mixte** : OHLCV (nombres) + news headlines (texte libre) + live API (flux continu).
-- **API-fetchable** : CoinGecko sans clé, 10k calls/mois, historique depuis 2014.
-- **5 Go+ rapide** : bulk Kaggle stocks (~5 Go) + bulk news headlines (~50 Mo) = volume immédiat en un chargement.
-- **Analytiquement riche** : daily returns, rolling volatility, top movers, news correlation → KPIs financiers au-delà du simple sentiment.
-
----
+- **Mixte** : OHLCV (numérique) + headlines (texte libre) + flux API continu.
+- **API-fetchable** : CoinGecko sans clé ni quota bloquant.
+- **5 Go+ en un chargement** : l'archive actions/ETF atteint le volume exigé.
+- **Analytiquement riche** : daily returns, rolling volatility, top movers, volume de news — des KPIs financiers plus rigoureux qu'un score de sentiment générique.
 
 ## 4. Architecture Medallion
 
 ### Bronze — données brutes
 
-- Ingestion des archives Kaggle (stocks, news) et flux CoinGecko (crypto_live) sans transformation.
-- Stockage sur **HDFS** (`/data/bronze/{stocks,crypto_live,crypto_news}/{YYYY/MM/DD}/`).
+- Ingestion des archives (stocks/ETF, crypto, headlines) et du flux CoinGecko sans transformation.
+- Stockage sur **HDFS** (`/data/bronze/{stocks,crypto_bulk,crypto_live,crypto_news}/{YYYY-MM-DD}/`).
 - Partitionnement par date d'ingestion.
 - Métriques : nombre de records écrits, durée d'ingestion, statut (succès/échec par lot).
 
@@ -130,6 +134,7 @@ L'option 11 (Trading/Crypto) coche toutes les cases du brief :
 - **Déduplication exacte** : hash SHA-256 sur `(source, external_id, ingested_at)`.
 - **Déduplication approximative** : MinHash + LSH (datasketch) sur le champ `headline` (5-word shingles), seuil Jaccard 0.8.
 - Enrichissement : colonne `source_type` (`stock_ohlcv` | `crypto_ohlcv` | `crypto_news`).
+- Écriture en `partitionOverwriteMode=dynamic` : relancer une date ne détruit pas les autres.
 - Stockage **Parquet** partitionné par `source_type` et date.
 - Métriques : comptage nulls par colonne, records invalides, doublons exacts + approximatifs trouvés, durée transformation.
 
@@ -153,14 +158,15 @@ Métriques : durée de calcul, lignes agrégées, lignes écrites en base.
 
 | Composant | Technologie | Rôle |
 |---|---|---|
-| **Orchestration** | Makefile + cron | Cible Bronze → Silver → Gold via `make demo` |
+| **Orchestration** | Makefile + cron | Bronze → Silver → Gold via `make demo` |
 | **Traitement distribué** | Apache Spark (cluster Docker, 1 master + N workers) | Transformations Silver + Gold |
 | **Stockage brut** | HDFS (apache/hadoop) | Couche Bronze |
 | **Stockage intermédiaire** | HDFS | Couche Silver (Parquet) |
 | **Entrepôt** | PostgreSQL 16 | Couche Gold (schéma `gold`) |
-| **Monitoring** | Prometheus + cAdvisor + Grafana | Métriques cluster + per-layer ops, 1 dashboard |
+| **Monitoring** | Prometheus + cAdvisor + postgres-exporter + Pushgateway + Grafana | Métriques cluster + par couche, 1 dashboard |
 | **Conteneurisation** | Docker Compose | Services + limites mémoire laptop (commentées dans `docker-compose.yml`) |
-| **CLI** | Makefile | `make up/down/bulk/crypto-live/ingest-news/transform/load/monitor/demo/test/reset/logs` |
+| **Dashboard** | Next.js 14 + shadcn/ui + d3 + Lightweight Charts | Overview, pilotage, 6 visualisations comparatives |
+| **CLI** | Makefile | `make up/down/reset/init-hdfs/bulk/crypto/crypto-live/transform/load/demo/monitor/test/logs/ui` |
 
 Aucun service cloud externe. Stack locale, reproductible, conforme au sujet. Les `mem_limit` par service sont commentés dans `docker-compose.yml` (décommentez pour un laptop 16 Go avec Docker Desktop réglé sur 10 Go). En production, laissez-les commentés : Docker alloue librement.
 
@@ -180,20 +186,28 @@ Aucun service cloud externe. Stack locale, reproductible, conforme au sujet. Les
   2. Bronze — Records écrits / durée d'ingestion.
   3. Silver — Doublons exacts + approximatifs trouvés, durée transformation.
   4. Gold — Retours quotidiens, volatilité 7j, lignes chargées.
-  5. Métier — Top movers, news volume par coin, sentiment VADER sur headlines.
+  5. Métier — Top movers et volume de news par coin.
 
 ### Métriques exposées
 
-Émises par les jobs Python via `prometheus_client` (pushgateway) ou par les exporters de service :
+Poussées par les jobs Python vers le Pushgateway (`scripts/push_metrics.py`), scrapées par Prometheus. L'envoi est best-effort : une panne du monitoring ne fait jamais échouer le pipeline.
 
-- `bronze_records_total{source}`
+**Bronze** (`scripts/fetch_*.py`) :
+- `bronze_records_total{source}` — source ∈ `stocks`, `crypto_bulk`, `crypto_live`, `crypto_news`
 - `bronze_write_duration_seconds{source}`
-- `silver_null_count_total{column, source}`
-- `silver_duplicates_exact_total{source}`
-- `silver_duplicates_approximate_total{source}`
-- `silver_invalid_records_total{source}`
+
+**Silver** (`jobs/silver_transform.py`) :
+- `silver_records_in_total`, `silver_records_out_total`
+- `silver_duplicates_exact_total`, `silver_duplicates_approximate_total`
+- `silver_invalid_records_total`
+- `silver_null_count_total{column}`
+- `silver_transform_duration_seconds`
+
+**Gold** (`jobs/gold_kpis.py`) :
 - `gold_rows_loaded_total{table}`
-- `gold_kpi_compute_duration_seconds{kpi}`
+- `gold_kpi_compute_duration_seconds`
+
+**Système** : cAdvisor (CPU/RAM/disque/IO par conteneur) et postgres-exporter (connexions, latence).
 
 ### Pourquoi 1 dashboard et non 3
 
@@ -203,136 +217,129 @@ Le brief demande du monitoring par couche, pas un nombre de dashboards. Un dashb
 
 ## 7. Indicateurs métier (KPIs)
 
-| KPI | Description | Source |
+| KPI | Table Gold | Description |
 |---|---|---|
-| Daily prices | OHLCV par ticker par jour | Silver (price_daily) |
-| Daily returns | Variation % vs jour précédent, par ticker | Silver (price_daily) |
-| Top movers | Top 10 gainers + losers par jour | Gold |
-| Rolling volatility 7d | Écart-type glissant 7j des retours | Gold |
-| News volume | Nombre de headlines crypto par jour | Silver + Gold |
-| VADER sentiment | Score moyen des headlines crypto | Gold (bonus) |
+| Daily prices | `gold.daily_prices` | OHLCV par (date, ticker, source) |
+| Daily returns | `gold.daily_returns` | Variation % vs jour précédent, par (date, ticker) |
+| Top movers | `gold.top_movers` | Top 10 gainers + 10 losers par jour |
+| Rolling volatility 7d | `gold.rolling_volatility_7d` | Écart-type glissant 7j des retours |
+| News volume | `gold.news_volume_per_coin` | Nombre de headlines par (date, ticker) |
+| News headlines | `gold.news_headlines` | Texte des headlines, servi au dashboard |
+
+`daily_prices` conserve une ligne par source (archive et CoinGecko coexistent pour BTC/ETH). Tout ce qui est en aval est ramené à une ligne par (date, ticker) via `collapse_to_one_source`, sinon la clé primaire de `daily_returns` serait violée et le `lag()` alternerait entre deux sources.
 
 ## 7b. Dashboard comparatif
 
-Le dashboard Next.js expose deux nouvelles routes en plus de l'overview / pipeline :
+Dashboard Next.js (`make ui`, http://localhost:3001). Il lit **uniquement PostgreSQL** : les redirections WebHDFS pointent vers le hostname interne du datanode, injoignable depuis l'hôte, donc le texte des headlines transite par `gold.news_headlines`.
 
-- **`/analysis`** : sélection multi-tickers (2 à 6) → six visualisations comparatives :
-  - Histogramme des distributions de rendements journaliers par ticker (chevauchement transparent).
-  - Ridgeline plot : densités empilées (Gaussian KDE, bandwidth type Silverman).
-  - Diagramme chord : corrélations deux-à-deux entre tickers (largeur = |corr|, vert = positive, rouge = négative).
-  - Radar multi-métriques : mean return, volatility, news volume, latest price (normalisés 0..1).
-  - Bubble map : x=date, y=|return|, taille=|volume|, couleur=sign du return.
-  - Word cloud : top termes des headlines crypto pour les tickers sélectionnés (via `react-wordcloud`).
-- **`/symbol/[ticker]`** : page détail par ticker avec :
-  - Graphique OHLCV candlestick (TradingView **Lightweight Charts** — librairie OSS MIT, pas l'API TradingView).
-  - Stats : latest close, total return %, days tracked, news count.
-  - Liste des news headlines extraites du CSV CryptoDataDownload (champ `articles`).
-  - Source attribution : d'où viennent les données (Bronze path, ingestion date).
+- **`/`** : overview + pilotage du pipeline (Bulk / Transform / Load) avec progression live.
+- **`/analysis`** : sélection de 2 à 6 tickers (avec filtre de recherche — la couche Gold contient des centaines de symboles) → six visualisations :
+  1. **Histogramme** des distributions de rendements journaliers par ticker.
+  2. **Ridgeline** : densités empilées (KDE gaussien).
+  3. **Chord** : corrélations deux-à-deux (largeur = |corr|, vert = positive, rouge = négative).
+  4. **Radar** multi-métriques : mean return, volatility, news volume, latest price (normalisés 0..1).
+  5. **Bubble map** : x = date, y = rendement %, taille = volume réel, couleur = signe. Les valeurs proviennent de `gold.daily_prices`, jointes aux rendements sur (ticker, date).
+  6. **Word cloud** : termes les plus fréquents des headlines des tickers sélectionnés (tokenisation faite en SQL).
+- **`/symbol/[ticker]`** : chandelier OHLCV (TradingView **Lightweight Charts**, librairie OSS MIT — pas l'API TradingView), stats (latest close, total return %, days tracked, news count), liste des headlines, et attribution de source.
 
-**Ce que nous N'avons PAS** (honnête sur les limites du livrable) :
-- Pas de fondamentaux (P/E, EPS, market cap, dividends).
-- Pas de prix temps réel (uniquement archives statiques).
-- Pas de données d'analystes ou de ratings.
-- Pas de filings SEC.
-- Pas d'API TradingView (on utilise leur librairie OSS Lightweight Charts pour dessiner nos propres données).
+Deux tickers sans fenêtre temporelle commune donnent une corrélation de 0 : c'est correct, pas un bug. Une action dont l'historique s'arrête en 2017 ne recouvre pas une crypto qui démarre en 2021.
 
-C'est un **outil exploratoire** sur le dataset ingéré, pas un service de recommandation d'investissement. Aucune suggestion de trade.
-
----
+**Ce que le livrable ne contient pas** : pas de fondamentaux (P/E, EPS, market cap), pas de prix temps réel intraday, pas de ratings d'analystes, pas de filings SEC, pas d'API TradingView. C'est un **outil exploratoire** sur les données ingérées, pas un service de recommandation. Aucune suggestion de trade.
 
 ## 8. Structure du dépôt
 
 ```
 BigDataProject/
-├── docker-compose.yml              # namenode, datanode, spark-master, spark-worker, postgres, prometheus, grafana, cadvisor
-├── Makefile                        # make up/down/bulk/crypto-live/ingest-news/transform/load/monitor/demo/test/reset/logs
+├── docker-compose.yml              # namenode, datanode, spark-master, spark-worker, postgres,
+│                                   # postgres-exporter, pushgateway, prometheus, grafana, cadvisor
+├── Makefile                        # up/down/reset/init-hdfs/bulk/crypto/crypto-live/spark-deps/
+│                                   # transform/load/demo/monitor/test/logs/ui
 ├── .env.example                    # Template des variables d'environnement
 ├── config/
-│   ├── spark/                      # spark-defaults.conf, log4j.properties
 │   ├── hdfs/                       # core-site.xml, hdfs-site.xml
-│   └── postgres/                   # init.sql (schéma gold)
+│   └── postgres/                   # init.sql (création du schéma gold)
 ├── scripts/
-│   ├── fetch_stocks.py            # Ingestion Bronze : Kaggle stocks OHLCV (bulk CSV)
-│   ├── fetch_crypto_live.py       # Ingestion Bronze : CoinGecko API (live)
-│   ├── fetch_news.py              # Ingestion Bronze : Kaggle crypto news headlines
-│   └── upload_to_hdfs.py           # Wrapper HDFS (WebHDFS + fallback /tmp)
+│   ├── fetch_stocks.py             # Bronze : archives OHLCV actions + ETF (*.us.txt)
+│   ├── fetch_crypto.py             # Bronze : CSV crypto -> OHLCV + headlines (2 partitions)
+│   ├── fetch_crypto_live.py        # Bronze : CoinGecko API (live, cron-friendly)
+│   └── upload_to_hdfs.py           # Staging local + upload HDFS (WebHDFS, repli via conteneur)
 ├── jobs/
-│   ├── silver_transform.py         # Spark : schéma + dedup exact (SHA-256) + approx (MinHash/LSH) + Parquet
-│   ├── gold_kpis.py                # Spark : returns + volatilité + movers + news volume → Postgres
-│   └── silver_utils.py             # Schemas Spark-free + helpers pour tests
+│   ├── silver_transform.py         # Spark : schéma + dedup SHA-256 + MinHash/LSH -> Parquet
+│   ├── gold_kpis.py                # Spark : KPIs -> PostgreSQL
+│   ├── silver_utils.py             # Schéma et helpers sans dépendance Spark (testables)
+│   └── postgresql-42.7.3.jar       # Driver JDBC (téléchargé par `make load`, non versionné)
 ├── sql/
-│   └── gold_schema.sql             # DDL tables Gold partitionnées (daily_prices, daily_returns, top_movers, volatility, news_volume)
+│   └── gold_schema.sql             # DDL des 6 tables Gold, partitionnées par date
 ├── tests/
-│   ├── test_smoke_bronze.py        # 10 records → 10 sur HDFS
-│   ├── test_smoke_silver.py        # 10 records → 10 Parquet valides
-│   └── test_smoke_gold.py          # 10 records → 10 lignes Postgres
+│   ├── test_smoke_bronze.py        # Normalisation + 10 records -> 10 lignes JSON
+│   ├── test_smoke_silver.py        # Clés de dedup, schéma, détection de quasi-doublons
+│   └── test_smoke_gold.py          # Formes des KPIs + garde sur la clé (date, ticker)
 ├── monitoring/
-│   ├── prometheus.yml              # Scrape config (spark, postgres, cadvisor, pushgateway)
-│   ├── alerts.yml                  # Règles d'alerte (pipeline en retard, espace HDFS)
+│   ├── prometheus.yml              # Scrape config (cadvisor, postgres-exporter, pushgateway)
 │   └── grafana/
-│       ├── dashboards/             # 1 dashboard JSON unifié (6-8 panels)
-│       └── provisioning/           # datasources + dashboard auto-load
-├── notebooks/
-│   └── exploration.ipynb           # Dev / debug local (pas dans le pipeline prod)
-├── main.py                         # Point d'entrée : orchestration des 3 jobs
-├── requirements.txt                # praw, requests, pyspark, vaderSentiment, datasketch, prometheus_client, psycopg2-binary
+│       ├── dashboards/             # 1 dashboard JSON unifié
+│       └── provisioning/           # datasources + auto-load des dashboards
+├── dashboard/                      # Next.js 14 + shadcn/ui + d3 + lightweight-charts
+│   ├── pages/                      # index, analysis, symbol/[ticker], api/*
+│   ├── components/viz/             # histogram, ridgeline, chord, radar, bubble-map,
+│   │                               # word-cloud, price-chart
+│   └── lib/                        # data-source.ts (pool pg), jobs.ts, exec.ts, pipeline-store.ts
+├── main.py                         # Orchestration des 3 couches
+├── requirements.txt
 └── README.md
 ```
-
----
 
 ## 9. Démarrage rapide
 
 ### Pré-requis
 
 - Docker + Docker Compose v2.
-- Python 3.11+ (pour exécution locale des scripts d'ingestion).
-- 16 Go RAM minimum (cluster Spark + HDFS + Postgres + monitoring).
-- **Docker Desktop : allouer 10 Go de RAM minimum** (Settings → Resources → Memory).
-- Kaggle account (for downloading the stocks dataset).
+- Python 3.11+ (les scripts d'ingestion tournent sur l'hôte, pas dans un conteneur).
+- 16 Go RAM (Docker Desktop réglé sur 10 Go minimum : Settings → Resources → Memory).
 
 ### Configuration
 
 ```bash
 cp .env.example .env
-# Renseigner : STOCKS_BULK_PATH (chemin local vers le CSV Kaggle stocks),
-#             NEWS_BULK_PATH (chemin local vers le CSV Kaggle crypto news)
+pip install -r requirements.txt
 ```
 
-### Téléchargement des datasets
+### Données
 
-1. **Kaggle "Huge Stock Market Dataset"** par borismarjanovic
-   - URL : https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs
-   - Télécharger le CSV (~5 Go), placer dans `data/stocks_etfs.csv`
-
-2. **Kaggle "Crypto News Headlines & Market Prices by Date"** par aaroncbastian
-   - URL : https://www.kaggle.com/datasets/aaroncbastian/crypto-news-headlines-and-market-prices-by-date
-   - Télécharger le CSV, placer dans `data/crypto_news.csv`
-
-3. **CoinGecko API** : pas de téléchargement, appelé en live par `scripts/fetch_crypto_live.py`.
+1. **Archive actions + ETF** — https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs
+   Extraire pour obtenir `data/Stocks/*.us.txt` et `data/ETFs/*.us.txt`.
+   Autre emplacement : `make bulk STOCKS_DIR=... ETFS_DIR=...`.
+2. **CSV crypto** — un fichier par coin dans `data/` (`BTC.csv`, `ETH.csv`, …), colonnes CryptoDataDownload avec la colonne `articles`.
+3. **CoinGecko** — rien à télécharger, appelé en live par `make crypto-live`.
 
 ### Commandes
 
 ```bash
-make up              # Démarre tout le cluster (HDFS, Spark, Postgres, Prometheus, Grafana, cAdvisor)
-make init-hdfs       # Crée les répertoires /data/bronze, /data/silver, /data/gold
-make bulk            # Bronze : charge le CSV stocks → HDFS
-make crypto-live     # Bronze : pull CoinGecko BTC 90j → HDFS
-make ingest-news     # Bronze : charge le CSV crypto news → HDFS
-make transform       # Silver : nettoyage + dedup SHA-256 + MinHash/LSH → HDFS Parquet
-make load            # Gold : returns + volatility + movers + news volume → Postgres
-make demo            # Tout en un : up + bulk + transform + load + URLs Grafana/Prometheus
-make monitor         # Ouvre Grafana (http://localhost:3000) + Prometheus (http://localhost:9090)
-make test            # Smoke tests pytest (Bronze/Silver/Gold, 10 records chacun)
-make logs            # Tail des logs de tous les services
-make down            # Stop + suppression des conteneurs (volumes préservés)
-make reset           # Down + suppression des volumes (reset complet)
+make up            # Démarre le cluster (HDFS, Spark, Postgres, Prometheus, Grafana, cAdvisor)
+make init-hdfs     # Crée /data/{bronze,silver,gold} et ouvre les permissions
+make bulk          # Bronze : archives actions + ETF -> HDFS
+make crypto        # Bronze : OHLCV crypto + headlines -> HDFS (2 partitions)
+make crypto-live   # Bronze : CoinGecko API -> HDFS
+make transform     # Silver : nettoyage + dedup SHA-256 + MinHash/LSH -> Parquet
+make load          # Gold : KPIs -> PostgreSQL (idempotent)
+make demo          # Enchaîne tout ce qui précède
+make ui            # Dashboard Next.js sur http://localhost:3001
+make monitor       # Affiche les URLs Grafana / Prometheus / cAdvisor
+make test          # Smoke tests pytest
+make logs          # Tail des logs
+make down          # Stop (volumes conservés)
+make reset         # Stop + suppression des volumes
 ```
+
+`make transform` réinstalle `datasketch` dans les conteneurs Spark au préalable : l'image `apache/spark` n'embarque aucun paquet Python tiers, et l'installation ne survit pas à `make reset`.
+
+`make load` télécharge le driver JDBC PostgreSQL dans `jobs/` s'il est absent.
 
 ### URLs locales
 
 | Service | URL | Identifiants |
 |---|---|---|
+| Dashboard | http://localhost:3001 | — |
 | Spark Master UI | http://localhost:8088 | — |
 | HDFS NameNode UI | http://localhost:9870 | — |
 | PostgreSQL | `localhost:5432` | `gold` / `gold` / `gold` |
@@ -344,18 +351,23 @@ make reset           # Down + suppression des volumes (reset complet)
 
 ## 10. Variables d'environnement
 
-Tout via `.env` (jamais commit) :
+Tout via `.env` (jamais commité) :
 
 | Variable | Usage |
 |---|---|
-| `STOCKS_BULK_PATH` | Chemin local vers le CSV Kaggle stocks (pour `make bulk`) |
-| `NEWS_BULK_PATH` | Chemin local vers le CSV Kaggle crypto news (pour `make ingest-news`) |
-| `HDFS_NAMENODE` | Hôte HDFS (default `namenode`) |
-| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Connexion Gold |
+| `STOCKS_DIR`, `ETFS_DIR` | Répertoires des `*.us.txt` OHLCV |
+| `CRYPTO_DIR` | Répertoire des CSV crypto par coin |
+| `TICKERS_FILE` | Optionnel : restreint l'ingestion à une liste de tickers |
+| `HDFS_NAMENODE`, `HDFS_PORT` | Hôte/port RPC HDFS **dans** le cluster (utilisés par Spark) |
+| `HDFS_WEBHDFS_HOST`, `HDFS_WEB_UI_PORT` | Endpoint WebHDFS vu **depuis l'hôte** (`localhost:9870`) |
+| `BRONZE_LOCAL_FALLBACK` | Répertoire de staging local (défaut : temp système) |
+| `POSTGRES_HOST/PORT/DB/USER/PASSWORD` | Connexion Gold |
 | `SPARK_MASTER_URL` | URL du master Spark |
 | `GRAFANA_ADMIN_PASSWORD` | Mot de passe admin Grafana |
-| `PROMETHEUS_RETENTION` | Durée de rétention TSDB (default `15d`) |
-| `CADVISOR_PORT` | Port UI cAdvisor (default `8081`) |
+| `PROMETHEUS_RETENTION` | Rétention TSDB (défaut `15d`) |
+| `CADVISOR_PORT` | Port UI cAdvisor (défaut `8081`) |
+
+`HDFS_PORT` (9000) est le port RPC et ne parle pas HTTP : les clients WebHDFS doivent viser `HDFS_WEB_UI_PORT` (9870). Les deux jeux de variables existent parce que Spark tourne dans le réseau Compose alors que les scripts d'ingestion et le dashboard tournent sur l'hôte.
 
 ---
 
@@ -383,15 +395,10 @@ Tout via `.env` (jamais commit) :
 - Plus simple à démontrer, à maintenir, à défendre à l'oral.
 
 **Choix de Trading/Crypto (option 11 du cahier des charges).**
-- Bulk : le dataset Kaggle stocks (~5 Go) atteint le volume exigé en un seul chargement. Pushshift / archive Reddit n'est plus accessible depuis 2023, Kaggle / Arctic Shift / torrent sont les alternatives viables.
+- Bulk : l'archive actions/ETF (~5 Go) atteint le volume exigé en un seul chargement.
 - Live : CoinGecko couvre l'exigence « fetch automatisé via API ».
 - Subject finance : les KPIs financiers (returns, volatility, movers) sont plus rigoureux que du sentiment générique et démontrent mieux la valeur analytique du pipeline.
 - Voir §3 pour le détail dataset.
-
-**VADER pour le sentiment des headlines.**
-- Standard pour texte social/news, rapide, pas de GPU, intégré NLTK.
-- Optimisé pour l'anglais, moins pour les langues européennes. Acceptable pour ce projet, mentionné explicitement.
-- Utilisé en bonus sur le champ `headline` de la couche Gold, pas comme KPI principal.
 
 **Stratégie mem_limit (laptop).**
 - Les `mem_limit` par service sont commentés dans `docker-compose.yml` ; décommentez selon votre machine.
@@ -402,8 +409,11 @@ Tout via `.env` (jamais commit) :
 
 ## 12. Limites connues & pistes d'amélioration
 
-- **VADER limité au texte court social/news.** Migrer vers un modèle transformer (FinBERT ou DistilBERT) pour le news en v2.
-- **CoinGecko rate limit (10k calls/mois).** Suffisant pour démo, à compléter par CryptoDataDownload pour la production.
-- **1 worker Spark par défaut.** La scalabilité est démontrée par `--scale` mais pas stress-testée sur ce livrable.
-- **Smoke tests uniquement.** pytest couvre 10 records par couche, pas de tests de propriétés.
-- **Pas de cross-source correlation.** Pour aller plus loin : corrélation retours quotidiens vs news volume sur la même fenêtre temporelle → détection d'événements anormaux.
+- **Pas d'analyse de sentiment.** VADER figurait dans une version antérieure mais n'était jamais appliqué (import mort, aucune table Gold). Retiré plutôt que laissé à moitié fait. Un modèle transformer (FinBERT) sur `gold.news_headlines` serait le bon ajout en v2.
+- **Ingestion HDFS via le conteneur namenode.** WebHDFS redirige les écritures vers le hostname interne du datanode, injoignable depuis l'hôte. `scripts/upload_to_hdfs.py` tente WebHDFS puis bascule sur `docker compose cp` + `hdfs dfs -put`. Une vraie correction demanderait de publier les ports datanode et de réécrire le hostname annoncé.
+- **`datasketch` installé à chaud dans les conteneurs Spark.** Ça marche et c'est réappliqué par `make transform`, mais une image Spark dédiée serait plus propre.
+- **Dedup approximative côté driver.** MinHash/LSH tourne sur le driver via `toLocalIterator()`. Correct au volume traité (~92k headlines), à repenser si le corpus grossit d'un ordre de grandeur.
+- **1 worker Spark par défaut.** La scalabilité est démontrée par `--scale` mais pas stress-testée.
+- **Smoke tests uniquement.** pytest couvre la normalisation, les clés de dedup et les formes de KPIs — pas de tests de propriétés ni d'intégration bout-en-bout automatisée.
+- **Pas de corrélation cross-source.** Prochaine étape naturelle : corréler rendements quotidiens et volume de news sur la même fenêtre pour détecter les événements anormaux.
+- **Permissions HDFS en 777.** Cluster mono-nœud sans authentification. À ne pas reproduire sur un déploiement partagé.

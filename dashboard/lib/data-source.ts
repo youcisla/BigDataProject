@@ -156,107 +156,60 @@ export async function getOhlcv(ticker: string, limit = 1000): Promise<OhlcvRow[]
   }
 }
 
-/** Ingestion date partitions under a Bronze source, newest first. */
-async function listBronzePartitions(source: string): Promise<string[]> {
+/**
+ * Fetch news headlines for a ticker from the Gold layer.
+ *
+ * Reads Postgres, not HDFS: the namenode redirects WebHDFS reads to the
+ * datanode's container hostname, which does not resolve from the host, so the
+ * previous Bronze-JSONL path always came back empty.
+ */
+export async function getHeadlines(ticker: string, limit = 50): Promise<Headline[]> {
   try {
-    const res = await webhdfs_get(`/data/bronze/${source}`, { op: "LISTSTATUS" });
-    const body = (await res.json()) as {
-      FileStatuses?: { FileStatus?: { pathSuffix: string; type: string }[] };
-    };
-    return (body.FileStatuses?.FileStatus ?? [])
-      .filter((f) => f.type === "DIRECTORY")
-      .map((f) => f.pathSuffix)
-      .sort()
-      .reverse();
-  } catch {
+    const result = await pool.query(
+      `SELECT date::text, ticker, headline, source
+       FROM gold.news_headlines
+       WHERE ticker = $1
+       ORDER BY date DESC
+       LIMIT $2`,
+      [ticker.toUpperCase(), limit]
+    );
+    return result.rows.map((r) => ({
+      date: r.date,
+      ticker: r.ticker,
+      headline: r.headline ?? "",
+      source: r.source ?? "",
+    }));
+  } catch (err) {
+    console.error(`getHeadlines(${ticker}) error:`, err);
     return [];
   }
 }
 
-/**
- * Fetch news headlines for a ticker from the Bronze crypto_news partitions.
- *
- * Partitions are discovered by listing HDFS. The previous version guessed
- * today's and yesterday's date, so any ingest older than 24h returned nothing.
- */
-export async function getHeadlines(ticker: string, limit = 50): Promise<Headline[]> {
-  const wanted = ticker.toUpperCase();
-  const partitions = await listBronzePartitions("crypto_news");
-
-  for (const d of partitions.slice(0, 5)) {
-    const url = new URL(`${HDFS_BASE}/data/bronze/crypto_news/${d}/headlines.jsonl`);
-    url.searchParams.set("op", "OPEN");
-    url.searchParams.set("offset", "0");
-    url.searchParams.set("length", String(50 * 1024 * 1024));
-    try {
-      const r = await fetch(url.toString());
-      if (!r.ok) continue;
-      const text = await r.text();
-      const headlines: Headline[] = [];
-      for (const line of text.split("\n")) {
-        if (!line) continue;
-        try {
-          const obj = JSON.parse(line);
-          if ((obj.ticker ?? "").toUpperCase() !== wanted) continue;
-          headlines.push({
-            date: obj.date ?? d,
-            ticker: obj.ticker,
-            headline: obj.headline ?? "",
-            source: obj.source ?? "",
-          });
-          if (headlines.length >= limit) break;
-        } catch {
-          // skip malformed lines
-        }
-      }
-      if (headlines.length > 0) return headlines;
-    } catch {
-      // try the next partition
-    }
-  }
-  return [];
-}
-
-/** Headline text for several tickers at once — backs the word cloud. */
+/** Most frequent headline terms across several tickers — backs the word cloud. */
 export async function getHeadlineTerms(
   tickers: string[],
   topN = 60,
 ): Promise<{ text: string; value: number }[]> {
-  const wanted = new Set(tickers.map((t) => t.toUpperCase()));
-  const partitions = await listBronzePartitions("crypto_news");
-  const counts = new Map<string, number>();
-
-  for (const d of partitions.slice(0, 3)) {
-    const url = new URL(`${HDFS_BASE}/data/bronze/crypto_news/${d}/headlines.jsonl`);
-    url.searchParams.set("op", "OPEN");
-    url.searchParams.set("offset", "0");
-    url.searchParams.set("length", String(50 * 1024 * 1024));
-    try {
-      const r = await fetch(url.toString());
-      if (!r.ok) continue;
-      for (const line of (await r.text()).split("\n")) {
-        if (!line) continue;
-        try {
-          const obj = JSON.parse(line);
-          if (!wanted.has((obj.ticker ?? "").toUpperCase())) continue;
-          for (const raw of String(obj.headline ?? "").toLowerCase().match(/[a-z']{3,}/g) ?? []) {
-            if (STOPWORDS.has(raw)) continue;
-            counts.set(raw, (counts.get(raw) ?? 0) + 1);
-          }
-        } catch {
-          // skip malformed lines
-        }
-      }
-      if (counts.size > 0) break;
-    } catch {
-      // try the next partition
-    }
+  try {
+    // Tokenize in the database so only the aggregate crosses the wire.
+    const result = await pool.query(
+      `SELECT word AS text, COUNT(*)::int AS value
+       FROM (
+         SELECT REGEXP_SPLIT_TO_TABLE(LOWER(headline), '[^a-z'']+') AS word
+         FROM gold.news_headlines
+         WHERE ticker = ANY($1::text[])
+       ) t
+       WHERE LENGTH(word) >= 3 AND NOT (word = ANY($2::text[]))
+       GROUP BY word
+       ORDER BY value DESC
+       LIMIT $3`,
+      [tickers.map((t) => t.toUpperCase()), Array.from(STOPWORDS), topN]
+    );
+    return result.rows.map((r) => ({ text: r.text, value: r.value }));
+  } catch (err) {
+    console.error("getHeadlineTerms error:", err);
+    return [];
   }
-
-  return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([text, value]) => ({ text, value }));
 }
 
 const STOPWORDS = new Set(

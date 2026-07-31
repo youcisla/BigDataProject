@@ -62,7 +62,7 @@ def build_spark() -> SparkSession:
 def load_bronze(spark: SparkSession, date_str: str):
     """Load all Bronze JSON files for a given date across the trading sources."""
     frames = []
-    for source in ("stocks", "crypto_bulk", "crypto_news"):
+    for source in ("stocks", "crypto_bulk", "crypto_live", "crypto_news"):
         path = f"{BRONZE_BASE}/{source}/{date_str}/"
         try:
             df = spark.read.schema(build_schema()).json(path)
@@ -196,7 +196,15 @@ def transform(spark: SparkSession, date_str: str) -> dict:
     near_dup_ids = find_near_duplicates(news_rows)
     logger.info("Approximate duplicates found: %d", len(near_dup_ids))
 
-    after_approx = deduped.filter(~F.col("external_id").isin(list(near_dup_ids))) if near_dup_ids else deduped
+    # Anti-join, not `isin`. Inlining tens of thousands of ids as SQL literals
+    # builds a query plan large enough to blow up the JVM during analysis.
+    if near_dup_ids:
+        dup_df = spark.createDataFrame(
+            [(i,) for i in near_dup_ids], "external_id string"
+        ).hint("broadcast")
+        after_approx = deduped.join(dup_df, on="external_id", how="left_anti")
+    else:
+        after_approx = deduped
     duplicates_approx = len(near_dup_ids)
     records_after_approx = after_approx.count()
 
@@ -231,6 +239,29 @@ def transform(spark: SparkSession, date_str: str) -> dict:
     }
 
 
+def push_silver_metrics(metrics: dict) -> None:
+    """Emit the per-layer metrics Prometheus scrapes from the Pushgateway.
+
+    Best-effort: a monitoring outage must not fail the pipeline.
+    """
+    try:
+        from scripts.push_metrics import PushgatewayClient
+    except ImportError:
+        logger.warning("push_metrics unavailable, skipping Prometheus push")
+        return
+
+    client = PushgatewayClient(job="silver")
+    client.observe("silver_records_in_total", value=metrics["records_in"])
+    client.observe("silver_records_out_total", value=metrics["records_out"])
+    client.observe("silver_duplicates_exact_total", value=metrics["duplicates_exact"])
+    client.observe("silver_duplicates_approximate_total", value=metrics["duplicates_approx"])
+    client.observe("silver_invalid_records_total", value=metrics["invalid"])
+    client.observe("silver_transform_duration_seconds", value=metrics.get("duration_seconds", 0))
+    for column, count in (metrics.get("nulls") or {}).items():
+        client.observe("silver_null_count_total", labels={"column": column}, value=count)
+    client.push()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Silver transformation job.")
     parser.add_argument("--date", required=True, help="Partition date (YYYY-MM-DD).")
@@ -240,8 +271,21 @@ def main() -> int:
     try:
         metrics = transform(spark, args.date)
         logger.info("Metrics: %s", json.dumps(metrics, default=str))
+        push_silver_metrics(metrics)
     finally:
         spark.stop()
+
+    # Reading zero Bronze records means a broken path, an unreachable namenode,
+    # or a missing ingest — never a healthy run. Exiting 0 here made the
+    # dashboard and `make demo` report success on an empty pipeline.
+    if metrics["records_in"] == 0:
+        logger.error(
+            "No Bronze records read for %s. Check that ingestion ran and that "
+            "HDFS is reachable at %s.",
+            args.date,
+            BRONZE_BASE,
+        )
+        return 1
     return 0
 
 

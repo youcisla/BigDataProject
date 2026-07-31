@@ -196,6 +196,37 @@ def compute_news_volume_per_coin(silver):
     )
 
 
+def compute_news_headlines(silver, limit_per_ticker: int = 2000):
+    """Recent headline text per ticker, for the dashboard's news list and word cloud."""
+    w = Window.partitionBy("ticker").orderBy(F.col("date").desc())
+    return (
+        silver.filter(F.col("source_type") == F.lit("crypto_news"))
+        .filter(F.col("headline").isNotNull())
+        .filter(F.col("ticker").isNotNull())
+        .withColumn("_rank", F.row_number().over(w))
+        .filter(F.col("_rank") <= limit_per_ticker)
+        .withColumn("updated_at", F.current_timestamp())
+        .select("date", "ticker", "headline", "source", "updated_at")
+    )
+
+
+def push_gold_metrics(tables: dict, duration: float) -> None:
+    """Emit per-table row counts to the Pushgateway. Best-effort."""
+    try:
+        from scripts.push_metrics import PushgatewayClient
+    except ImportError:
+        logger.warning("push_metrics unavailable, skipping Prometheus push")
+        return
+
+    client = PushgatewayClient(job="gold")
+    client.observe("gold_kpi_compute_duration_seconds", value=duration)
+    for table, df in tables.items():
+        # The DataFrames are already materialised in Postgres; counting here is
+        # a cheap re-read compared to the write that just happened.
+        client.observe("gold_rows_loaded_total", labels={"table": table}, value=df.count())
+    client.push()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gold KPI aggregation job.")
     parser.add_argument("--date", default=None, help="Optional date filter (YYYY-MM-DD).")
@@ -220,6 +251,7 @@ def main() -> int:
         top_movers = compute_top_movers(daily_returns)
         rolling_volatility = compute_rolling_volatility_7d(daily_returns)
         news_volume = compute_news_volume_per_coin(silver)
+        news_headlines = compute_news_headlines(silver)
 
         logger.info("Writing daily_prices...")
         write_postgres(spark, daily_prices, "gold.daily_prices")
@@ -231,9 +263,22 @@ def main() -> int:
         write_postgres(spark, rolling_volatility, "gold.rolling_volatility_7d")
         logger.info("Writing news_volume_per_coin...")
         write_postgres(spark, news_volume, "gold.news_volume_per_coin")
+        logger.info("Writing news_headlines...")
+        write_postgres(spark, news_headlines, "gold.news_headlines")
 
         duration = time.time() - started
         logger.info("Gold job complete in %.2fs", duration)
+        push_gold_metrics(
+            {
+                "gold.daily_prices": daily_prices,
+                "gold.daily_returns": daily_returns,
+                "gold.top_movers": top_movers,
+                "gold.rolling_volatility_7d": rolling_volatility,
+                "gold.news_volume_per_coin": news_volume,
+                "gold.news_headlines": news_headlines,
+            },
+            duration,
+        )
         return 0
     finally:
         spark.stop()

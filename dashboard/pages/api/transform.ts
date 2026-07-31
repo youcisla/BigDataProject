@@ -10,7 +10,7 @@ export default function handler(_req: NextApiRequest, res: NextApiResponse) {
       "exec",
       "-T",
       "spark-master",
-      "spark-submit",
+      "/opt/spark/bin/spark-submit",
       "--master",
       "spark://spark-master:7077",
       "--deploy-mode",

@@ -83,7 +83,25 @@ CREATE TABLE gold.news_volume_per_coin (
 
 CREATE TABLE gold.news_volume_per_coin_default PARTITION OF gold.news_volume_per_coin DEFAULT;
 
+-- ============================================================================
+-- news_headlines : the headline text itself, for the dashboard
+-- The dashboard cannot read Bronze over WebHDFS — the namenode redirects reads
+-- to the datanode's container hostname, which is unreachable from the host.
+-- Serving the text from the warehouse keeps the dashboard on one data source.
+-- ============================================================================
+DROP TABLE IF EXISTS gold.news_headlines CASCADE;
+CREATE TABLE gold.news_headlines (
+    date        DATE    NOT NULL,
+    ticker      TEXT    NOT NULL,
+    headline    TEXT    NOT NULL,
+    source      TEXT,
+    updated_at  TIMESTAMP NOT NULL DEFAULT now()
+) PARTITION BY RANGE (date);
+
+CREATE TABLE gold.news_headlines_default PARTITION OF gold.news_headlines DEFAULT;
+
 -- Indexes for dashboard queries
+CREATE INDEX IF NOT EXISTS idx_news_headlines_ticker ON gold.news_headlines(ticker, date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker ON gold.daily_prices(ticker);
 CREATE INDEX IF NOT EXISTS idx_daily_returns_ticker ON gold.daily_returns(ticker);
 CREATE INDEX IF NOT EXISTS idx_top_movers_date ON gold.top_movers(date);

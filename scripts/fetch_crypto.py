@@ -21,6 +21,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -114,6 +115,18 @@ def collect_files(folder: Path, coins: set[str] | None) -> list[Path]:
     return found
 
 
+def push_bronze_metrics(source: str, records: int, duration: float) -> None:
+    """Emit Bronze counters to the Pushgateway. Best-effort: never fails the ingest."""
+    try:
+        from scripts.push_metrics import PushgatewayClient
+    except ImportError:
+        return
+    client = PushgatewayClient(job="bronze")
+    client.observe("bronze_records_total", labels={"source": source}, value=records)
+    client.observe("bronze_write_duration_seconds", labels={"source": source}, value=duration)
+    client.push()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ingest crypto OHLCV + news into Bronze HDFS.")
     parser.add_argument("--folder", default=DEFAULT_FOLDER, help="Folder to scan for crypto CSVs.")
@@ -166,10 +179,15 @@ def main() -> int:
 
     # Two separate Bronze partitions, one per source_type. The Silver job and
     # the dashboard both address these by path, so they must not be merged.
+    started = time.time()
     ohlcv_count = upload_json_lines(ohlcv_rows(), ohlcv_target)
     logger.info("Bronze crypto_bulk done: %d records at %s", ohlcv_count, ohlcv_target)
+    push_bronze_metrics("crypto_bulk", ohlcv_count, time.time() - started)
+
+    started = time.time()
     news_count = upload_json_lines(news_rows(), news_target)
     logger.info("Bronze crypto_news done: %d records at %s", news_count, news_target)
+    push_bronze_metrics("crypto_news", news_count, time.time() - started)
     return 0
 
 

@@ -6,7 +6,11 @@ services:
     command: ["hdfs", "namenode"]
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
-      - ENSURE_NAMENODE_DIR=/tmp/hadoop-root/dfs/name
+      # Must match dfs.namenode.name.dir in config/hdfs/hdfs-site.xml. Pointing
+      # this at /tmp meant the entrypoint formatted a directory the namenode
+      # never used, so HDFS came up empty after every restart and the
+      # namenode_data volume below held nothing.
+      - ENSURE_NAMENODE_DIR=/opt/hadoop/data/nameNode
     # On a 16 GB laptop, set Docker Desktop memory to 10 GB and uncomment:
     # mem_limit: 1.5g
     # mem_reservation: 768m
@@ -16,7 +20,7 @@ services:
     volumes:
       - ./config/hdfs/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./config/hdfs/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
-      - namenode_data:/opt/hadoop/data/nameNode
+      - namenode_data:/opt/hadoop/data
     networks:
       - bigdata-net
     healthcheck:
@@ -38,7 +42,7 @@ services:
     volumes:
       - ./config/hdfs/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./config/hdfs/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
-      - datanode_data:/opt/hadoop/data/dataNode
+      - datanode_data:/opt/hadoop/data
     networks:
       - bigdata-net
     depends_on:

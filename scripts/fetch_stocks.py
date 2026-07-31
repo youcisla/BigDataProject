@@ -17,6 +17,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -93,6 +94,18 @@ def collect_files(folders: list[str], tickers: set[str] | None) -> list[tuple[Pa
     return found
 
 
+def push_bronze_metrics(source: str, records: int, duration: float) -> None:
+    """Emit Bronze counters to the Pushgateway. Best-effort: never fails the ingest."""
+    try:
+        from scripts.push_metrics import PushgatewayClient
+    except ImportError:
+        return
+    client = PushgatewayClient(job="bronze")
+    client.observe("bronze_records_total", labels={"source": source}, value=records)
+    client.observe("bronze_write_duration_seconds", labels={"source": source}, value=duration)
+    client.push()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ingest US stocks + ETFs OHLCV into Bronze HDFS.")
     parser.add_argument("--folder", action="append", help="Folder(s) to scan (default: data/Stocks data/ETFs).")
@@ -134,8 +147,10 @@ def main() -> int:
             logger.info("  %s (%s): %d rows", path.name, ticker, n)
         logger.info("Total rows: %d", total)
 
+    started = time.time()
     count = upload_json_lines(all_rows(), target)
     logger.info("Bronze stocks done: %d records at %s", count, target)
+    push_bronze_metrics("stocks", count, time.time() - started)
     return 0
 
 
