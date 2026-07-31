@@ -48,6 +48,18 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: "hdfs", label: "HDFS", hint: "Browse the data lake filesystem" },
 ];
 
+/** Bronze partitions hold one JSONL file whose name depends on the source. */
+const BRONZE_FILE: Record<string, string> = {
+  crypto_news: "headlines.jsonl",
+  news_rss: "headlines.jsonl",
+  crypto_live: "ohlc.jsonl",
+  intraday: "bars.jsonl",
+};
+
+function bronzeFilename(source: string): string {
+  return BRONZE_FILE[source] ?? "ohlcv.jsonl";
+}
+
 function formatBytes(bytes: number): string {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -88,9 +100,7 @@ export default function DataExplorer() {
     const first = layers.bronze.sources[0];
     const part = first?.partitions[0];
     if (!first || !part) return;
-    const guess = first.source === "crypto_news" ? "headlines.jsonl"
-      : first.source === "crypto_live" ? "ohlc.jsonl" : "ohlcv.jsonl";
-    openBronze(`/data/bronze/${first.source}/${part.date}/${guess}`);
+    openBronze(`/data/bronze/${first.source}/${part.date}/${bronzeFilename(first.source)}`);
   }, [tab, layers, bronzeFile]);
 
   const openBronze = (path: string) => {
@@ -258,9 +268,7 @@ export default function DataExplorer() {
                           </div>
                           <div className="mt-2 space-y-1">
                             {s.partitions.slice(0, 3).map((p) => {
-                              const file = s.source === "crypto_news" ? "headlines.jsonl"
-                                : s.source === "crypto_live" ? "ohlc.jsonl" : "ohlcv.jsonl";
-                              const path = `/data/bronze/${s.source}/${p.date}/${file}`;
+                              const path = `/data/bronze/${s.source}/${p.date}/${bronzeFilename(s.source)}`;
                               return (
                                 <button
                                   key={p.date}
