@@ -9,7 +9,13 @@
  * where possible, streaming JSON parsing for large WebHDFS responses.
  */
 
-import { Pool } from "pg";
+import { Pool, types as pgTypes } from "pg";
+
+// Return DATE as the literal 'YYYY-MM-DD' string. By default pg parses it into
+// a JS Date at local midnight, so on a UTC+N host `2026-07-30` serialised back
+// as `2026-07-29T22:00:00Z` — the wrong calendar day. Trading dates have no
+// time zone; keep them as text.
+pgTypes.setTypeParser(pgTypes.builtins.DATE, (v) => v);
 
 const HDFS_NAMENODE = process.env.HDFS_NAMENODE ?? "localhost";
 const HDFS_PORT = process.env.HDFS_PORT ?? "9870";
@@ -273,6 +279,137 @@ export async function getRecentPrices(
   } catch (err) {
     console.error("getRecentPrices error:", err);
     return [];
+  }
+}
+
+/** The Gold tables a user may browse, and how to describe each one. */
+export const GOLD_TABLES = [
+  { name: "daily_prices", label: "Daily prices", description: "OHLCV per (date, ticker, source)", order: "date DESC, ticker" },
+  { name: "daily_returns", label: "Daily returns", description: "% change vs previous trading day", order: "date DESC, ticker" },
+  { name: "top_movers", label: "Top movers", description: "Top 10 gainers + losers per day", order: "date DESC, direction, rank" },
+  { name: "rolling_volatility_7d", label: "Volatility 7d", description: "Rolling 7-day stddev of returns", order: "date DESC, ticker" },
+  { name: "news_volume_per_coin", label: "News volume", description: "Headline count per (date, ticker)", order: "date DESC, ticker" },
+  { name: "news_headlines", label: "News headlines", description: "Headline text served to the UI", order: "date DESC, ticker" },
+  { name: "silver_sample", label: "Silver sample", description: "Materialised slice of the Silver layer", order: "source_type, date DESC" },
+] as const;
+
+export type GoldTableName = (typeof GOLD_TABLES)[number]["name"];
+
+export function isGoldTable(name: string): name is GoldTableName {
+  return GOLD_TABLES.some((t) => t.name === name);
+}
+
+export interface TablePage {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total: number;
+}
+
+/** Read one page of a Gold table. `table` must be validated by isGoldTable first. */
+export async function getTablePage(
+  table: GoldTableName,
+  limit = 50,
+  offset = 0,
+  filter?: { column: string; value: string },
+): Promise<TablePage> {
+  const spec = GOLD_TABLES.find((t) => t.name === table)!;
+  const safeLimit = Math.max(1, Math.min(500, limit));
+  const safeOffset = Math.max(0, offset);
+
+  // `table` and `order` come from the constant above, never from the request.
+  // Only the filter *value* is user input, and it goes through a bound param.
+  let where = "";
+  const params: unknown[] = [];
+  if (filter?.value) {
+    const columns = await getTableColumns(table);
+    if (columns.includes(filter.column)) {
+      params.push(`%${filter.value}%`);
+      where = `WHERE ${filter.column}::text ILIKE $${params.length}`;
+    }
+  }
+
+  const totalResult = await pool.query(`SELECT COUNT(*)::int AS n FROM gold.${table} ${where}`, params);
+  const rowsResult = await pool.query(
+    `SELECT * FROM gold.${table} ${where} ORDER BY ${spec.order} LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+    params,
+  );
+
+  return {
+    columns: rowsResult.fields.map((f) => f.name),
+    rows: rowsResult.rows,
+    total: totalResult.rows[0]?.n ?? 0,
+  };
+}
+
+async function getTableColumns(table: GoldTableName): Promise<string[]> {
+  const result = await pool.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'gold' AND table_name = $1`,
+    [table],
+  );
+  return result.rows.map((r) => r.column_name);
+}
+
+export interface GoldTableStat {
+  name: string;
+  label: string;
+  description: string;
+  rows: number;
+}
+
+/** Row counts for every Gold table, in one round trip. */
+export async function getGoldStats(): Promise<GoldTableStat[]> {
+  const union = GOLD_TABLES.map(
+    (t) => `SELECT '${t.name}' AS name, COUNT(*)::int AS rows FROM gold.${t.name}`,
+  ).join(" UNION ALL ");
+  try {
+    const result = await pool.query(union);
+    const byName = new Map(result.rows.map((r) => [r.name, r.rows]));
+    return GOLD_TABLES.map((t) => ({
+      name: t.name,
+      label: t.label,
+      description: t.description,
+      rows: byName.get(t.name) ?? 0,
+    }));
+  } catch (err) {
+    console.error("getGoldStats error:", err);
+    return GOLD_TABLES.map((t) => ({ ...t, rows: 0 }));
+  }
+}
+
+/** Headline numbers for the overview: coverage of the warehouse. */
+export async function getWarehouseOverview(): Promise<{
+  tickers: number;
+  tradingDays: number;
+  firstDate: string | null;
+  lastDate: string | null;
+  sources: { source: string; rows: number; tickers: number }[];
+}> {
+  try {
+    const [agg, sources] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(DISTINCT ticker)::int AS tickers,
+                COUNT(DISTINCT date)::int  AS trading_days,
+                MIN(date)::text AS first_date,
+                MAX(date)::text AS last_date
+         FROM gold.daily_prices`,
+      ),
+      pool.query(
+        `SELECT source, COUNT(*)::int AS rows, COUNT(DISTINCT ticker)::int AS tickers
+         FROM gold.daily_prices GROUP BY source ORDER BY rows DESC LIMIT 12`,
+      ),
+    ]);
+    const a = agg.rows[0] ?? {};
+    return {
+      tickers: a.tickers ?? 0,
+      tradingDays: a.trading_days ?? 0,
+      firstDate: a.first_date ?? null,
+      lastDate: a.last_date ?? null,
+      sources: sources.rows.map((r) => ({ source: r.source, rows: r.rows, tickers: r.tickers })),
+    };
+  } catch (err) {
+    console.error("getWarehouseOverview error:", err);
+    return { tickers: 0, tradingDays: 0, firstDate: null, lastDate: null, sources: [] };
   }
 }
 

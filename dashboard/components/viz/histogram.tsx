@@ -1,8 +1,8 @@
-// @ts-nocheck
 "use client";
 
 import { useMemo } from "react";
-import { bin, extent, max, min, scaleLinear } from "d3-array";
+import { bin, extent, max, min } from "d3-array";
+import { scaleLinear } from "d3-scale";
 
 interface Datum {
   ticker: string;
@@ -46,17 +46,18 @@ export function HistogramChart({ data, width = 360, height = 220 }: Props) {
   }
   const bins = 20;
   const x = scaleLinear().domain([lo, hi]).range([0, width - 80]).nice();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const binGen: any = bin<Datum>().value((d: Datum) => d.value).domain([lo, hi]).thresholds(bins);
+  // The series are already unwrapped to plain numbers, so bin over numbers
+  // rather than over Datum with a .value accessor.
+  const binGen = bin().domain([lo, hi]).thresholds(bins);
 
-  const maxCount = max(series.flatMap(([t, v]) => binGen(v).map((b) => b.length))) ?? 1;
+  const maxCount = max(series.flatMap(([, v]) => binGen(v).map((b) => b.length))) ?? 1;
   const y = scaleLinear().domain([0, maxCount]).range([height - 30, 10]);
 
   return (
     <svg width={width} height={height} className="font-mono">
       <g transform="translate(60,0)">
         {series.map(([ticker, values], idx) => {
-          const binned: any[] = binGen(values);
+          const binned = binGen(values);
           const color = PALETTE[idx % PALETTE.length];
           return (
             <g key={ticker}>

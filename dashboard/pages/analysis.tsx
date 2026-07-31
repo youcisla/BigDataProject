@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Head from "next/head";
 import { motion } from "framer-motion";
-import { ArrowRight, Database, GitBranch, Loader2, Settings as SettingsIcon, Sparkles, TerminalSquare, Eye } from "lucide-react";
+import { ArrowRight, Loader2 } from "lucide-react";
 
+import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { HistogramChart } from "@/components/viz/histogram";
@@ -36,15 +37,19 @@ interface ComparePayload {
   correlation: { tickers: string[]; matrix: number[][] };
 }
 
-const NAV = [
-  { id: "overview", label: "Overview", icon: Sparkles, href: "/#overview" },
-  { id: "pipeline", label: "Pipeline", icon: GitBranch, href: "/#pipeline" },
-  { id: "analysis", label: "Analysis", icon: Eye, href: "/analysis" },
-  { id: "logs", label: "Logs", icon: TerminalSquare, href: "/#logs" },
-  { id: "settings", label: "Settings", icon: SettingsIcon, href: "/#settings" },
-];
-
 const MAX_SELECTED = 6;
+
+/**
+ * Label a ticker by its ingest source.
+ *
+ * Substring matching on "crypto" mislabelled every equity as crypto, because
+ * the stock archive's source is literally `cryptodatadownload_stock`.
+ */
+function assetKind(source: string): string {
+  if (source.endsWith("_etf")) return "ETF";
+  if (source.endsWith("_stock")) return "Stock";
+  return "Crypto";
+}
 
 export default function AnalysisPage() {
   const [symbols, setSymbols] = useState<SymbolSummary[]>([]);
@@ -57,11 +62,31 @@ export default function AnalysisPage() {
     fetch("/api/symbols")
       .then((r) => r.json())
       .then((j) => {
-        const all: SymbolSummary[] = j.symbols ?? [];
+        const raw: SymbolSummary[] = j.symbols ?? [];
+        // /api/symbols returns one row per (ticker, source). The UI selects by
+        // ticker, so fold the sources together — otherwise a ticker carried by
+        // two feeds renders twice and can be "selected" twice.
+        const merged = new Map<string, SymbolSummary>();
+        for (const s of raw) {
+          const prev = merged.get(s.ticker);
+          if (!prev) {
+            merged.set(s.ticker, { ...s });
+            continue;
+          }
+          prev.ohlcv_rows += s.ohlcv_rows;
+          prev.news_rows = Math.max(prev.news_rows, s.news_rows);
+          if (s.first_date < prev.first_date) prev.first_date = s.first_date;
+          if (s.last_date > prev.last_date) prev.last_date = s.last_date;
+        }
+        const all = Array.from(merged.values());
         setSymbols(all);
         // Auto-select 3 symbols that actually have OHLCV rows (skip zero-row symbols).
         const withData = all.filter((s) => s.ohlcv_rows > 0);
-        setSelected(withData.slice(0, 3).map((s) => s.ticker));
+        // Prefer tickers that carry headlines, so the word cloud and news
+        // volume have something to show on first load. Plain alphabetical
+        // order lands on equities, which have no news in this dataset.
+        const ranked = [...withData].sort((a, b) => b.news_rows - a.news_rows);
+        setSelected(ranked.slice(0, 3).map((s) => s.ticker));
       })
       .catch(() => setSymbols([]));
   }, []);
@@ -154,61 +179,17 @@ export default function AnalysisPage() {
       <Head>
         <title>BigData Pipeline — Analysis</title>
       </Head>
-      <main className="min-h-screen bg-background text-foreground">
-        <div className="grid min-h-screen grid-cols-[260px_1fr]">
-          {/* Sidebar */}
-          <aside className="border-r bg-card/30 backdrop-blur-sm flex flex-col sticky top-0 h-screen">
-            <div className="p-6 border-b">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 shadow-lg shadow-blue-500/30">
-                  <Database className="h-5 w-5 text-white" />
-                </div>
-                <div>
-                  <h1 className="text-base font-semibold leading-tight">BigData Pipeline</h1>
-                  <p className="text-xs text-muted-foreground">Medallion dashboard</p>
-                </div>
-              </div>
-            </div>
-
-            <nav className="flex-1 p-3 space-y-1">
-              {NAV.map((item) => (
-                <Link
-                  key={item.id}
-                  href={item.href}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all",
-                    item.id === "analysis"
-                      ? "bg-primary text-primary-foreground shadow-md shadow-primary/20"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
-          </aside>
-
-          {/* Main */}
-          <div className="overflow-auto">
-            <motion.header
-              initial="hidden"
-              animate="visible"
-              variants={fadeInUp}
-              className="sticky top-0 z-10 backdrop-blur-md bg-background/80 border-b px-8 py-4"
-            >
-              <h2 className="text-2xl font-bold tracking-tight">Analysis</h2>
-              <p className="text-sm text-muted-foreground">
-                Compare symbols across 6 visualizations. Pick 2-6 tickers below.
-              </p>
-            </motion.header>
-
-            <motion.div
-              initial="hidden"
-              animate="visible"
-              variants={stagger}
-              className="p-8 space-y-6 max-w-7xl"
-            >
+      <AppShell
+        active="analysis"
+        title="Analysis"
+        subtitle="Compare symbols across six visualizations. Pick 2 to 6 tickers."
+      >
+        <motion.div
+          initial="hidden"
+          animate="visible"
+          variants={stagger}
+          className="space-y-6"
+        >
               {/* Symbol selector */}
               <motion.div variants={fadeInUp}>
                 <Card>
@@ -242,7 +223,7 @@ export default function AnalysisPage() {
                           const disabled = !isOn && selected.length >= MAX_SELECTED;
                           return (
                             <button
-                              key={`${s.ticker}-${s.source}`}
+                              key={s.ticker}
                               onClick={() => toggle(s.ticker)}
                               disabled={disabled}
                               aria-pressed={isOn}
@@ -256,7 +237,7 @@ export default function AnalysisPage() {
                             >
                               <div className="font-semibold">{s.ticker}</div>
                               <div className="text-[10px] opacity-70 mt-0.5">
-                                {s.ohlcv_rows.toLocaleString()} rows - {s.source.includes("etf") ? "ETF" : s.source.includes("crypto") ? "Crypto" : "Stock"}
+                                {s.ohlcv_rows.toLocaleString()} rows · {assetKind(s.source)}
                               </div>
                             </button>
                           );
@@ -405,10 +386,8 @@ export default function AnalysisPage() {
                   </Card>
                 </motion.div>
               )}
-            </motion.div>
-          </div>
-        </div>
-      </main>
+        </motion.div>
+      </AppShell>
     </>
   );
 }

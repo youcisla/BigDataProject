@@ -100,8 +100,31 @@ CREATE TABLE gold.news_headlines (
 
 CREATE TABLE gold.news_headlines_default PARTITION OF gold.news_headlines DEFAULT;
 
+-- ============================================================================
+-- silver_sample : a bounded slice of the Silver layer, for the UI
+-- Silver is Parquet on HDFS. The dashboard speaks SQL, so publish a sample
+-- here to keep every Medallion layer inspectable from one place.
+-- ============================================================================
+DROP TABLE IF EXISTS gold.silver_sample CASCADE;
+CREATE TABLE gold.silver_sample (
+    source_type TEXT NOT NULL,
+    source      TEXT,
+    external_id TEXT,
+    ticker      TEXT,
+    date        DATE,
+    open        NUMERIC(18,8),
+    high        NUMERIC(18,8),
+    low         NUMERIC(18,8),
+    close       NUMERIC(18,8),
+    volume      BIGINT,
+    headline    TEXT,
+    ingested_at TEXT,
+    updated_at  TIMESTAMP NOT NULL DEFAULT now()
+);
+
 -- Indexes for dashboard queries
 CREATE INDEX IF NOT EXISTS idx_news_headlines_ticker ON gold.news_headlines(ticker, date DESC);
+CREATE INDEX IF NOT EXISTS idx_silver_sample_type ON gold.silver_sample(source_type);
 CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker ON gold.daily_prices(ticker);
 CREATE INDEX IF NOT EXISTS idx_daily_returns_ticker ON gold.daily_returns(ticker);
 CREATE INDEX IF NOT EXISTS idx_top_movers_date ON gold.top_movers(date);

@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Eye,
   GitBranch,
+  HardDrive,
   Layers,
   Loader2,
   PlayCircle,
@@ -48,6 +49,7 @@ const PIPELINE_BUTTONS: { id: Cmd; label: string; description: string; href: str
 const NAV = [
   { id: "overview", label: "Overview", icon: Sparkles, href: "#overview" },
   { id: "pipeline", label: "Pipeline", icon: GitBranch, href: "#pipeline" },
+  { id: "data", label: "Data explorer", icon: HardDrive, href: "/data" },
   { id: "analysis", label: "Analysis", icon: Eye, href: "/analysis" },
   { id: "logs", label: "Logs", icon: TerminalSquare, href: "#logs" },
   { id: "settings", label: "Settings", icon: SettingsIcon, href: "#settings" },
@@ -192,27 +194,45 @@ export default function Home() {
             </div>
 
             <nav className="flex-1 p-3 space-y-1">
-              {NAV.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => navigate(item.id as typeof activeSection)}
-                  className={cn(
+              {NAV.map((item) => {
+                const itemClass = (isActive: boolean) =>
+                  cn(
                     "w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all relative group",
-                    activeSection === item.id
+                    isActive
                       ? "bg-primary text-primary-foreground shadow-md shadow-primary/20"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                  {activeSection === item.id && (
-                    <motion.span
-                      layoutId="nav-indicator"
-                      className="absolute right-2 h-1.5 w-1.5 rounded-full bg-current"
-                    />
-                  )}
-                </button>
-              ))}
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  );
+
+                // Entries pointing at another route must navigate, not just
+                // rewrite the hash on this page.
+                if (!item.href.startsWith("#")) {
+                  return (
+                    <Link key={item.id} href={item.href} className={itemClass(false)}>
+                      <item.icon className="h-4 w-4" />
+                      {item.label}
+                    </Link>
+                  );
+                }
+
+                const isActive = activeSection === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => navigate(item.id as typeof activeSection)}
+                    aria-current={isActive ? "page" : undefined}
+                    className={itemClass(isActive)}
+                  >
+                    <item.icon className="h-4 w-4" />
+                    {item.label}
+                    {isActive && (
+                      <motion.span
+                        layoutId="nav-indicator"
+                        className="absolute right-2 h-1.5 w-1.5 rounded-full bg-current"
+                      />
+                    )}
+                  </button>
+                );
+              })}
             </nav>
 
             <div className="p-3 border-t space-y-1">

@@ -22,14 +22,21 @@ logger = logging.getLogger(__name__)
 
 
 class PushgatewayClient:
+    """Emit layer metrics to the Pushgateway.
+
+    The same code runs in two places: the ingestion scripts on the host and the
+    Spark jobs inside the Docker network. `pushgateway` only resolves inside
+    the network, and `localhost` only works from the host — so try both rather
+    than silently dropping every Bronze metric when run from the host, which is
+    what left the Grafana panels empty.
+    """
+
     def __init__(self, host: str | None = None, port: int | None = None, job: str = "bigdata"):
-        self.host = host or os.environ.get("PUSHGATEWAY_HOST", "pushgateway")
+        configured = host or os.environ.get("PUSHGATEWAY_HOST")
+        self.hosts = [configured] if configured else ["pushgateway", "localhost"]
         self.port = port or int(os.environ.get("PUSHGATEWAY_PORT", "9091"))
         self.job = job
         self._metrics: list[tuple[str, dict, float]] = []
-
-    def _base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
 
     def inc(self, name: str, labels: dict | None = None, value: float = 1.0) -> None:
         self._metrics.append((name, labels or {}, value))
@@ -49,15 +56,31 @@ class PushgatewayClient:
                 body_lines.append(f"{name} {value}")
         body = "\n".join(body_lines) + "\n"
 
-        try:
-            import requests
+        # urllib, not requests: this module is imported by the Spark jobs, and
+        # the apache/spark image ships no third-party packages. A missing
+        # `requests` used to make every Silver and Gold metric push vanish.
+        import urllib.error
+        import urllib.request
 
-            url = f"{self._base_url()}/metrics/job/{self.job}"
-            response = requests.put(url, data=body, timeout=5)
-            response.raise_for_status()
-            self._metrics.clear()
-            logger.info("Pushed %d metrics to %s", len(body_lines), url)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Pushgateway push failed: %s", exc)
-            return False
+        payload = body.encode("utf-8")
+        last_error: Exception | None = None
+        for host in self.hosts:
+            url = f"http://{host}:{self.port}/metrics/job/{self.job}"
+            try:
+                request = urllib.request.Request(
+                    url, data=payload, method="PUT", headers={"Content-Type": "text/plain"}
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    if response.status >= 400:
+                        raise RuntimeError(f"HTTP {response.status}")
+                self._metrics.clear()
+                # Stick to the host that worked for the rest of this process.
+                self.hosts = [host]
+                logger.info("Pushed %d metrics to %s", len(body_lines), url)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+
+        # Monitoring must never fail the pipeline, so this stays a warning.
+        logger.warning("Pushgateway push failed (tried %s): %s", ", ".join(self.hosts), last_error)
+        return False

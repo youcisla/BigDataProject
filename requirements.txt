@@ -8,6 +8,7 @@ hdfs[kerberos]==2.7.3
 pyspark==3.5.1
 
 # Silver — approximate dedup (MinHash + LSH)
+defusedxml==0.7.1
 datasketch==1.6.4
 
 # Gold — Postgres write

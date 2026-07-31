@@ -117,20 +117,31 @@ def compute_daily_prices(silver):
 
 
 def collapse_to_one_source(daily_prices):
-    """One row per (date, ticker), picking a stable source.
+    """One row per (date, ticker), from a single source per ticker.
 
     daily_prices is keyed on (date, ticker, source), but daily_returns and
-    everything downstream of it is keyed on (date, ticker) only. A ticker
-    present in two sources would otherwise produce two rows per day — a
-    primary-key violation on load, and a lag() that alternates between
-    sources and reports garbage returns.
+    everything downstream is keyed on (date, ticker) only. Two sources for one
+    ticker would otherwise produce two rows per day — a primary-key violation.
+
+    The source is chosen per *ticker*, not per (ticker, date). Choosing per
+    date lets the series hop between feeds mid-history: BTC switched from the
+    archive to the live API and manufactured a +180% single-day return, which
+    then poisoned volatility and top movers. Pick the feed with the longest
+    history for that ticker and stay on it.
     """
-    w = Window.partitionBy("date", "ticker").orderBy(F.col("source").asc())
-    return (
-        daily_prices.withColumn("_rank", F.row_number().over(w))
+    ranked_sources = (
+        daily_prices.groupBy("ticker", "source")
+        .agg(F.count("*").alias("_rows"))
+        .withColumn(
+            "_rank",
+            F.row_number().over(
+                Window.partitionBy("ticker").orderBy(F.col("_rows").desc(), F.col("source").asc())
+            ),
+        )
         .filter(F.col("_rank") == 1)
-        .drop("_rank")
+        .select("ticker", "source")
     )
+    return daily_prices.join(F.broadcast(ranked_sources), on=["ticker", "source"], how="inner")
 
 
 def compute_daily_returns(daily_prices):
@@ -210,6 +221,27 @@ def compute_news_headlines(silver, limit_per_ticker: int = 2000):
     )
 
 
+def compute_silver_sample(silver, per_source: int = 300):
+    """A materialised slice of Silver, so the dashboard can display it.
+
+    Silver lives in Parquet on HDFS, which the dashboard cannot read: it speaks
+    SQL and HTTP, not Parquet, and WebHDFS reads redirect to an unreachable
+    datanode host. Publishing a bounded sample per source_type keeps the
+    Medallion layers inspectable end to end without a second query engine.
+    """
+    w = Window.partitionBy("source_type").orderBy(F.col("date").desc(), F.col("ticker").asc())
+    return (
+        silver.withColumn("_rank", F.row_number().over(w))
+        .filter(F.col("_rank") <= per_source)
+        .withColumn("updated_at", F.current_timestamp())
+        .select(
+            "source_type", "source", "external_id", "ticker", "date",
+            "open", "high", "low", "close", "volume", "headline",
+            "ingested_at", "updated_at",
+        )
+    )
+
+
 def push_gold_metrics(tables: dict, duration: float) -> None:
     """Emit per-table row counts to the Pushgateway. Best-effort."""
     try:
@@ -265,6 +297,8 @@ def main() -> int:
         write_postgres(spark, news_volume, "gold.news_volume_per_coin")
         logger.info("Writing news_headlines...")
         write_postgres(spark, news_headlines, "gold.news_headlines")
+        logger.info("Writing silver_sample...")
+        write_postgres(spark, compute_silver_sample(silver), "gold.silver_sample")
 
         duration = time.time() - started
         logger.info("Gold job complete in %.2fs", duration)

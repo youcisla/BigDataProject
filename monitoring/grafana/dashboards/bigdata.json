@@ -1,9 +1,22 @@
 {
+  "uid": "bigdata-pipeline",
+  "title": "BigData Pipeline — Medallion",
+  "description": "Cluster health plus per-layer Bronze/Silver/Gold metrics. Every query here matches a metric the pipeline actually emits.",
+  "tags": ["bigdata", "medallion", "spark", "hdfs"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 3,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
   "annotations": {
     "list": [
       {
         "builtIn": 1,
-        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -12,171 +25,153 @@
       }
     ]
   },
-  "description": "Big Data pipeline monitoring: cluster health, Bronze/Silver/Gold layer metrics, business KPIs.",
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
-  "id": null,
-  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "source",
+        "label": "Bronze source",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "query": "label_values(bronze_records_total, source)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
   "panels": [
+    { "type": "row", "title": "Pipeline totals", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 80}]},
-          "unit": "percent"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
-      "id": 1,
-      "options": {"legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "100 - (avg by (name) (irate(container_cpu_usage_seconds_total{name=~\".+\",name!=\"\"}[5m])) * 100)",
-          "legendFormat": "{{name}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Cluster CPU usage by container",
-      "type": "timeseries"
+      "type": "stat",
+      "title": "Bronze records ingested",
+      "description": "Records written to HDFS Bronze, summed across sources.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "orange" }, "mappings": [] }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "area", "textMode": "auto", "colorMode": "value" },
+      "targets": [{ "refId": "A", "expr": "sum(bronze_records_total{source=~\"$source\"})", "legendFormat": "records" }]
     },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 80}]},
-          "unit": "bytes"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
-      "id": 2,
-      "options": {"legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "container_memory_usage_bytes{name=~\".+\",name!=\"\"}",
-          "legendFormat": "{{name}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Cluster RAM usage by container",
-      "type": "timeseries"
+      "type": "stat",
+      "title": "Silver records out",
+      "description": "Rows surviving schema validation and deduplication.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" }, "mappings": [] }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "area", "textMode": "auto", "colorMode": "value" },
+      "targets": [{ "refId": "A", "expr": "silver_records_out_total", "legendFormat": "records" }]
     },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1000}, {"color": "red", "value": 10000}]},
-          "unit": "short"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
-      "id": 3,
-      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "sum by (source) (bronze_records_total)",
-          "legendFormat": "{{source}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Bronze records ingested (per source)",
-      "type": "stat"
+      "type": "stat",
+      "title": "Gold rows loaded",
+      "description": "Rows written into PostgreSQL across all Gold tables.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "yellow" }, "mappings": [] }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "area", "textMode": "auto", "colorMode": "value" },
+      "targets": [{ "refId": "A", "expr": "sum(gold_rows_loaded_total)", "legendFormat": "rows" }]
     },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "bars", "fillOpacity": 50, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "normal"}},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
-          "unit": "short"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
-      "id": 4,
-      "options": {"legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "sum by (source) (silver_duplicates_exact_total)",
-          "legendFormat": "{{source}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Silver duplicates removed (per source)",
-      "type": "timeseries"
+      "type": "stat",
+      "title": "Duplicates removed",
+      "description": "SHA-256 exact matches plus MinHash/LSH near-duplicates dropped in Silver.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "purple" }, "mappings": [] }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "area", "textMode": "auto", "colorMode": "value" },
+      "targets": [{ "refId": "A", "expr": "silver_duplicates_exact_total + silver_duplicates_approximate_total", "legendFormat": "duplicates" }]
+    },
+
+    { "type": "row", "title": "Per-layer detail", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }, "collapsed": false },
+    {
+      "type": "barchart",
+      "title": "Bronze — records per source",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "mappings": [] }, "overrides": [] },
+      "options": { "orientation": "horizontal", "legend": { "showLegend": false, "displayMode": "list", "placement": "bottom" }, "xTickLabelRotation": 0 },
+      "targets": [{ "refId": "A", "expr": "sum by (source) (bronze_records_total{source=~\"$source\"})", "legendFormat": "{{source}}", "instant": true }]
     },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10000}, {"color": "red", "value": 100000}]},
-          "unit": "short"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
-      "id": 5,
-      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "type": "timeseries",
+      "title": "Silver — data quality",
+      "description": "Invalid rows and duplicates found on each transform run.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "sum by (table) (gold_rows_loaded_total)",
-          "legendFormat": "{{table}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Gold rows loaded (per table)",
-      "type": "stat"
+        { "refId": "A", "expr": "silver_duplicates_exact_total", "legendFormat": "exact duplicates" },
+        { "refId": "B", "expr": "silver_duplicates_approximate_total", "legendFormat": "near duplicates" },
+        { "refId": "C", "expr": "silver_invalid_records_total", "legendFormat": "invalid" }
+      ]
     },
     {
-      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "linear", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}},
-          "mappings": [],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": -0.3}, {"color": "green", "value": 0.3}]},
-          "unit": "short"
-        }
-      },
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
-      "id": 6,
-      "options": {"legend": {"calcs": ["mean"], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "type": "barchart",
+      "title": "Gold — rows per table",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 7 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "mappings": [] }, "overrides": [] },
+      "options": { "orientation": "horizontal", "legend": { "showLegend": false, "displayMode": "list", "placement": "bottom" }, "xTickLabelRotation": 0 },
+      "targets": [{ "refId": "A", "expr": "sum by (table) (gold_rows_loaded_total)", "legendFormat": "{{table}}", "instant": true }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Layer durations",
+      "description": "Wall-clock seconds for the last run of each layer.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "always" }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
-          "expr": "avg by (source) (gold_kpi_value{kpi=\"avg_sentiment\"})",
-          "legendFormat": "{{source}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Sentiment moyen par source (Gold KPI)",
-      "type": "timeseries"
+        { "refId": "A", "expr": "sum by (source) (bronze_write_duration_seconds{source=~\"$source\"})", "legendFormat": "bronze {{source}}" },
+        { "refId": "B", "expr": "silver_transform_duration_seconds", "legendFormat": "silver" },
+        { "refId": "C", "expr": "gold_kpi_compute_duration_seconds", "legendFormat": "gold" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Silver — nulls per column",
+      "description": "Nulls are expected where a source_type does not carry a field: a headline has no close price.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "stacking": { "group": "A", "mode": "normal" } }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "silver_null_count_total", "legendFormat": "{{column}}" }]
+    },
+
+    { "type": "row", "title": "Cluster & warehouse", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "collapsed": false },
+    {
+      "type": "timeseries",
+      "title": "CPU per container",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\".+\"}[2m])) * 100", "legendFormat": "{{name}}" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory per container",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sum by (name) (container_memory_usage_bytes{name=~\".+\"})", "legendFormat": "{{name}}" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "PostgreSQL — connections & commits",
+      "description": "Warehouse load while the Gold job writes.",
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "mappings": [] }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(pg_stat_database_numbackends{datname=\"gold\"})", "legendFormat": "connections" },
+        { "refId": "B", "expr": "sum(rate(pg_stat_database_xact_commit{datname=\"gold\"}[2m]))", "legendFormat": "commits/s" }
+      ]
     }
-  ],
-  "refresh": "30s",
-  "schemaVersion": 39,
-  "tags": ["bigdata", "medallion", "monitoring"],
-  "templating": {"list": []},
-  "time": {"from": "now-6h", "to": "now"},
-  "timepicker": {},
-  "timezone": "browser",
-  "title": "BigData Pipeline",
-  "uid": "bigdata-pipeline",
-  "version": 1,
-  "weekStart": ""
+  ]
 }

@@ -1,8 +1,8 @@
-// @ts-nocheck
 "use client";
 
 import { useMemo } from "react";
-import { extent, scaleLinear, mean, deviation } from "d3-array";
+import { extent, mean, deviation } from "d3-array";
+import { scaleLinear } from "d3-scale";
 
 interface Props {
   /** One entry per ticker; each entry's `values` is an array of daily returns in %. */

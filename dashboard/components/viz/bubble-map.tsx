@@ -1,7 +1,7 @@
-// @ts-nocheck
 "use client";
 
-import { extent, scaleLinear } from "d3-array";
+import { extent } from "d3-array";
+import { scaleLinear } from "d3-scale";
 
 interface Props {
   data: { date: string; close: number; volume: number; return_pct: number; ticker: string }[];

@@ -116,6 +116,13 @@ services:
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:latest
     container_name: postgres-exporter
+    # Recent exporter versions ship most collectors disabled, so the container
+    # reported pg_up=1 while exporting no pg_stat_database_* series at all and
+    # the Grafana warehouse panel stayed empty.
+    command:
+      - "--collector.stat_database"
+      - "--collector.stat_user_tables"
+      - "--collector.database"
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     ports:
