@@ -23,7 +23,13 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
+from pathlib import Path
+
+# spark-submit adds the script's directory to sys.path, not the project root,
+# so `from scripts.push_metrics import ...` would fail with ModuleNotFoundError.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pyspark.sql import SparkSession, functions as F, Window
 

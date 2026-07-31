@@ -86,7 +86,7 @@ LIVE_DAYS  ?= 90
 NEWS_TICKERS ?= 40
 
 bulk:
-	@if [ ! -d "$(STOCKS_DIR)" ]; then \
+	@if test ! -d "$(STOCKS_DIR)"; then \
 		echo "ERROR: $(STOCKS_DIR) not found."; \
 		echo "Download and extract: https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs"; \
 		echo "Override the location with: make bulk STOCKS_DIR=... ETFS_DIR=..."; \
@@ -121,8 +121,7 @@ ingest: bulk crypto crypto-live news intraday
 
 transform:
 	$(COMPOSE) exec -T $(SPARK_SERVICE) \
-		/opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client \
-		/opt/spark/jobs/silver_transform.py --date $$(date -u +%Y-%m-%d)
+		sh -c "/opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client /opt/spark/jobs/silver_transform.py --date \"\$$(date -u +%Y-%m-%d)\""
 
 # datasketch, vaderSentiment, and the Postgres JDBC driver are baked into the
 # image by docker/spark/Dockerfile, so no --packages and no pip install here.
