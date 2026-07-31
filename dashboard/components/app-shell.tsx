@@ -73,7 +73,10 @@ export function AppShell({
           </div>
         </aside>
 
-        <div className="min-w-0 overflow-auto">
+        {/* No overflow-auto here. It made this column its own scroll container,
+            which never grew past the grid row — so long pages were clipped and
+            the sticky header below had nothing to stick to. The body scrolls. */}
+        <div className="min-w-0">
           <motion.header
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}

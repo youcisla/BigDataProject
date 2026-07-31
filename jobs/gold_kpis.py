@@ -39,6 +39,10 @@ PG_USER = os.environ.get("POSTGRES_USER", "gold")
 PG_PASS = os.environ.get("POSTGRES_PASSWORD", "gold")
 PG_URL = f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}"
 
+# Every source_type that carries headline text. `crypto_news` comes from the
+# bundled CryptoDataDownload archive; `news` from the live RSS feeds.
+NEWS_SOURCE_TYPES = ["crypto_news", "news"]
+
 
 def build_spark() -> SparkSession:
     return (
@@ -103,7 +107,7 @@ def compute_daily_prices(silver):
     carry more than one row per key and `first` would depend on shuffle order.
     """
     return (
-        silver.filter(F.col("source_type") != F.lit("crypto_news"))
+        silver.filter(~F.col("source_type").isin(NEWS_SOURCE_TYPES + ["intraday"]))
         .filter(F.col("close").isNotNull())
         .groupBy("date", "ticker", "source")
         .agg(F.max("open").alias("open"),
@@ -198,7 +202,7 @@ def compute_rolling_volatility_7d(daily_returns):
 def compute_news_volume_per_coin(silver):
     """Headline count per (date, ticker)."""
     return (
-        silver.filter(F.col("source_type") == F.lit("crypto_news"))
+        silver.filter(F.col("source_type").isin(NEWS_SOURCE_TYPES))
         .filter(F.col("ticker").isNotNull())
         .groupBy("date", "ticker")
         .agg(F.count("*").alias("headline_count"))
@@ -207,17 +211,107 @@ def compute_news_volume_per_coin(silver):
     )
 
 
+def sentiment_udf():
+    """VADER compound score in [-1, 1], as a Spark UDF.
+
+    VADER is lexicon-based: no model download, no GPU, runs fine on the
+    executors. The analyzer is cached per executor because constructing it
+    parses a ~7500-entry lexicon, which is far too expensive per row.
+    """
+    from pyspark.sql.types import DoubleType
+
+    cache: dict[str, object] = {}
+
+    def score(headline):
+        if not headline:
+            return None
+        analyzer = cache.get("analyzer")
+        if analyzer is None:
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+            analyzer = SentimentIntensityAnalyzer()
+            cache["analyzer"] = analyzer
+        return float(analyzer.polarity_scores(headline)["compound"])  # type: ignore[union-attr]
+
+    return F.udf(score, DoubleType())
+
+
 def compute_news_headlines(silver, limit_per_ticker: int = 2000):
-    """Recent headline text per ticker, for the dashboard's news list and word cloud."""
+    """Recent headline text per ticker, scored with VADER sentiment.
+
+    Backs the per-symbol news feed, the word cloud, and the news markers drawn
+    on the price chart.
+    """
     w = Window.partitionBy("ticker").orderBy(F.col("date").desc())
+    score = sentiment_udf()
     return (
-        silver.filter(F.col("source_type") == F.lit("crypto_news"))
+        silver.filter(F.col("source_type").isin(NEWS_SOURCE_TYPES))
         .filter(F.col("headline").isNotNull())
         .filter(F.col("ticker").isNotNull())
         .withColumn("_rank", F.row_number().over(w))
         .filter(F.col("_rank") <= limit_per_ticker)
+        .withColumn("sentiment", score(F.col("headline")))
+        .withColumn(
+            "sentiment_label",
+            F.when(F.col("sentiment") > 0.15, F.lit("positive"))
+            .when(F.col("sentiment") < -0.15, F.lit("negative"))
+            .otherwise(F.lit("neutral")),
+        )
         .withColumn("updated_at", F.current_timestamp())
-        .select("date", "ticker", "headline", "source", "updated_at")
+        .select("date", "ticker", "headline", "url", "source", "sentiment", "sentiment_label", "updated_at")
+    )
+
+
+def compute_news_sentiment_daily(news_headlines, daily_returns):
+    """Daily average sentiment per ticker, joined to that day's return.
+
+    This is the table that answers the actual business question: does the tone
+    of the news line up with how the price moved? Keeping both columns on one
+    row lets the dashboard chart them together and lets SQL correlate them.
+    """
+    daily = (
+        news_headlines.groupBy("date", "ticker")
+        .agg(
+            F.avg("sentiment").alias("avg_sentiment"),
+            F.count("*").alias("headline_count"),
+            F.sum(F.when(F.col("sentiment") > 0.15, 1).otherwise(0)).alias("positive_count"),
+            F.sum(F.when(F.col("sentiment") < -0.15, 1).otherwise(0)).alias("negative_count"),
+        )
+    )
+    return (
+        daily.join(daily_returns.select("date", "ticker", "return_pct"), ["date", "ticker"], "left")
+        .withColumn("updated_at", F.current_timestamp())
+        .select(
+            "date", "ticker", "avg_sentiment", "headline_count",
+            "positive_count", "negative_count", "return_pct", "updated_at",
+        )
+    )
+
+
+def compute_intraday_prices(silver):
+    """Sub-daily OHLCV bars, keyed on (ticker, ts, interval).
+
+    Feeds the chart's 1m/5m/15m/1h timeframes. The daily archive cannot serve
+    those, so these rows come from the Yahoo chart API via
+    scripts/fetch_intraday.py.
+    """
+    return (
+        silver.filter(F.col("source_type") == F.lit("intraday"))
+        .filter(F.col("ts").isNotNull())
+        .filter(F.col("close").isNotNull())
+        # One Bronze file can be re-ingested; collapse to the last write per bar.
+        .groupBy("ticker", "ts", "interval")
+        .agg(
+            F.max("date").alias("date"),
+            F.max("open").alias("open"),
+            F.max("high").alias("high"),
+            F.min("low").alias("low"),
+            F.max("close").alias("close"),
+            F.max("volume").alias("volume"),
+        )
+        .withColumn("ts", F.to_timestamp("ts"))
+        .withColumn("updated_at", F.current_timestamp())
+        .select("ticker", "ts", "interval", "date", "open", "high", "low", "close", "volume", "updated_at")
     )
 
 
@@ -283,7 +377,9 @@ def main() -> int:
         top_movers = compute_top_movers(daily_returns)
         rolling_volatility = compute_rolling_volatility_7d(daily_returns)
         news_volume = compute_news_volume_per_coin(silver)
-        news_headlines = compute_news_headlines(silver)
+        news_headlines = compute_news_headlines(silver).cache()
+        news_sentiment = compute_news_sentiment_daily(news_headlines, daily_returns)
+        intraday = compute_intraday_prices(silver)
 
         logger.info("Writing daily_prices...")
         write_postgres(spark, daily_prices, "gold.daily_prices")
@@ -297,6 +393,10 @@ def main() -> int:
         write_postgres(spark, news_volume, "gold.news_volume_per_coin")
         logger.info("Writing news_headlines...")
         write_postgres(spark, news_headlines, "gold.news_headlines")
+        logger.info("Writing news_sentiment_daily...")
+        write_postgres(spark, news_sentiment, "gold.news_sentiment_daily")
+        logger.info("Writing intraday_prices...")
+        write_postgres(spark, intraday, "gold.intraday_prices")
         logger.info("Writing silver_sample...")
         write_postgres(spark, compute_silver_sample(silver), "gold.silver_sample")
 
@@ -310,6 +410,8 @@ def main() -> int:
                 "gold.rolling_volatility_7d": rolling_volatility,
                 "gold.news_volume_per_coin": news_volume,
                 "gold.news_headlines": news_headlines,
+                "gold.news_sentiment_daily": news_sentiment,
+                "gold.intraday_prices": intraday,
             },
             duration,
         )

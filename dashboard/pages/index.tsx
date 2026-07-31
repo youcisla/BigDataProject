@@ -258,7 +258,7 @@ export default function Home() {
           </aside>
 
           {/* Main */}
-          <div className="overflow-auto">
+          <div className="min-w-0">
             <RunningBanner job={runningBanner} onDismiss={() => setBannerDismissed(true)} />
 
             <motion.header
@@ -372,9 +372,9 @@ export default function Home() {
                         </Card>
                       </motion.div>
 
-                      {/* Postgres + HDFS row */}
-                      <motion.div variants={fadeInUp} className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <Card className="bg-card/40 backdrop-blur-sm">
+                      {/* Bento: warehouse status is a small tile, storage a wide one */}
+                      <motion.div variants={fadeInUp} className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <Card className="bg-card/40 backdrop-blur-sm md:col-span-1">
                           <CardHeader className="pb-3">
                             <CardTitle className="text-sm font-medium text-muted-foreground">Postgres</CardTitle>
                           </CardHeader>
@@ -389,7 +389,7 @@ export default function Home() {
                             )}
                           </CardContent>
                         </Card>
-                        <Card className="bg-card/40 backdrop-blur-sm">
+                        <Card className="bg-card/40 backdrop-blur-sm md:col-span-2">
                           <CardHeader className="pb-3">
                             <CardTitle className="text-sm font-medium text-muted-foreground">HDFS total</CardTitle>
                           </CardHeader>

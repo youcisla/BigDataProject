@@ -103,6 +103,8 @@ Sous-ensemble de 60 tickers actions/ETF + 9 cryptos (le pipeline complet accepte
 | **Crypto OHLCV (archive)** | CSV par coin | ticker, date, open/high/low/close | — | `bronze/crypto_bulk/` |
 | **CoinGecko API** | REST live | ticker, date, OHLC | — | `bronze/crypto_live/` |
 | **Crypto news headlines** | Colonne `articles` des CSV crypto | date, ticker, source | headline | `bronze/crypto_news/` |
+| **News financières RSS** | Flux RSS (Yahoo Finance par symbole, CoinDesk, CoinTelegraph, Nasdaq) | date, ticker, url, publisher | headline | `bronze/news_rss/` |
+| **Barres intraday** | Yahoo chart API | ticker, ts, interval, OHLCV | — | `bronze/intraday/` |
 
 ### Détail
 
@@ -110,6 +112,11 @@ Sous-ensemble de 60 tickers actions/ETF + 9 cryptos (le pipeline complet accepte
   URL : https://www.kaggle.com/datasets/borismarjanovic/price-volume-data-for-all-us-stocks-etfs
 - **CSV crypto (format CryptoDataDownload).** Un fichier par coin (`data/BTC.csv`, `data/ETH.csv`, …) avec les colonnes `begins_at, open_price, close_price, high_price, low_price, symbol, articles`. La colonne `articles` contient une liste de titres d'articles : `scripts/fetch_crypto.py` la décompose en enregistrements `crypto_news` distincts. C'est la source non structurée du projet.
 - **CoinGecko API.** `scripts/fetch_crypto_live.py` appelle `/coins/{id}/ohlc` (free tier, sans clé, 10-30 appels/min) pour BTC, ETH, SOL, ADA, AVAX, LTC. Couvre l'exigence « fetch automatisé via API » et se planifie par cron.
+- **News RSS (`scripts/fetch_news_rss.py`).** Deux familles de flux, sans clé API :
+  - *Par symbole* — Yahoo Finance publie un flux RSS par ticker, donc la headline arrive déjà rattachée au symbole. C'est ce qui alimente « clic sur un symbole → ses news ».
+  - *Marché* — CoinDesk, CoinTelegraph, Nasdaq. Chaque item est rattaché aux tickers cités dans le titre : alias pour les cryptos (`bitcoin` → BTC), et cash-tag obligatoire pour les actions (`$AAPL`), les symboles courts entrant sinon en collision avec des mots anglais.
+  Le XML est parsé par `defusedxml` : un flux RSS est une entrée réseau non fiable, et le parseur stdlib accepte les attaques XXE et « billion laughs ».
+- **Barres intraday (`scripts/fetch_intraday.py`).** L'archive Kaggle est *journalière uniquement* : aucune timeframe sous 1 jour n'est dérivable de ces données. Les barres 1m/5m/15m/1h viennent donc de l'API chart de Yahoo, qui plafonne l'historique par intervalle — 1m ≈ 7 jours, 5m/15m ≈ 60 jours, 1h ≈ 730 jours. Demander plus renvoie silencieusement moins, d'où le mapping explicite `INTERVAL_RANGE` dans le script.
 
 ### Justification du choix (option 11 du cahier des charges)
 
@@ -224,7 +231,10 @@ Le brief demande du monitoring par couche, pas un nombre de dashboards. Un dashb
 | Top movers | `gold.top_movers` | Top 10 gainers + 10 losers par jour |
 | Rolling volatility 7d | `gold.rolling_volatility_7d` | Écart-type glissant 7j des retours |
 | News volume | `gold.news_volume_per_coin` | Nombre de headlines par (date, ticker) |
-| News headlines | `gold.news_headlines` | Texte des headlines, servi au dashboard |
+| News headlines | `gold.news_headlines` | Texte des headlines + score VADER + label (positive/neutral/negative) |
+| News sentiment daily | `gold.news_sentiment_daily` | Tonalité moyenne par (date, ticker), jointe au rendement du jour |
+| Intraday prices | `gold.intraday_prices` | Barres OHLCV 1m/5m/15m/1h par (ticker, ts, interval) |
+| Silver sample | `gold.silver_sample` | Tranche matérialisée de Silver, pour l'explorateur de données |
 
 `daily_prices` conserve une ligne par source (archive et CoinGecko coexistent pour BTC/ETH). Tout ce qui est en aval est ramené à une ligne par (date, ticker) via `collapse_to_one_source`, sinon la clé primaire de `daily_returns` serait violée et le `lag()` alternerait entre deux sources.
 
@@ -315,25 +325,35 @@ pip install -r requirements.txt
 ### Commandes
 
 ```bash
+make build         # Construit l'image Spark (datasketch, VADER, driver JDBC inclus)
 make up            # Démarre le cluster (HDFS, Spark, Postgres, Prometheus, Grafana, cAdvisor)
 make init-hdfs     # Crée /data/{bronze,silver,gold} et ouvre les permissions
-make bulk          # Bronze : archives actions + ETF -> HDFS
-make crypto        # Bronze : OHLCV crypto + headlines -> HDFS (2 partitions)
-make crypto-live   # Bronze : CoinGecko API -> HDFS
+
+# Bronze — cinq sources
+make bulk          # Archives actions + ETF (~16,5 M enregistrements)
+make crypto        # OHLCV crypto + headlines groupés (2 partitions)
+make crypto-live   # CoinGecko API (cron-friendly)
+make news          # News RSS financières (cron-friendly)
+make intraday      # Barres 1m/5m/15m/1h (Yahoo chart API)
+make ingest        # Les cinq d'un coup
+
 make transform     # Silver : nettoyage + dedup SHA-256 + MinHash/LSH -> Parquet
-make load          # Gold : KPIs -> PostgreSQL (idempotent)
-make demo          # Enchaîne tout ce qui précède
+make load          # Gold : KPIs + sentiment VADER -> PostgreSQL (idempotent)
+make demo          # build + up + init-hdfs + ingest + transform + load
+
 make ui            # Dashboard Next.js sur http://localhost:3001
-make monitor       # Affiche les URLs Grafana / Prometheus / cAdvisor
-make test          # Smoke tests pytest
+make monitor       # URLs Grafana / Prometheus / cAdvisor / Pushgateway
+make test          # Smoke tests pytest (Bronze/Silver/Gold)
+make lint          # Typecheck TypeScript du dashboard
 make logs          # Tail des logs
 make down          # Stop (volumes conservés)
 make reset         # Stop + suppression des volumes
 ```
 
-`make transform` réinstalle `datasketch` dans les conteneurs Spark au préalable : l'image `apache/spark` n'embarque aucun paquet Python tiers, et l'installation ne survit pas à `make reset`.
+`datasketch`, `vaderSentiment` et le driver JDBC PostgreSQL sont **intégrés à l'image** (`docker/spark/Dockerfile`). Auparavant ils étaient installés à la main dans les conteneurs et disparaissaient à chaque `docker compose down` ; `--packages` échouait par ailleurs derrière un proxy TLS. D'où `make build` avant `make up` au premier lancement.
 
-`make load` télécharge le driver JDBC PostgreSQL dans `jobs/` s'il est absent.
+Les tickers ciblés par `make news` et `make intraday` se surchargent :
+`make intraday INTRADAY_TICKERS=BTC,ETH INTRADAY_INTERVALS=5m,1h` et `make news NEWS_TICKERS=100`.
 
 ### URLs locales
 
@@ -409,9 +429,10 @@ Tout via `.env` (jamais commité) :
 
 ## 12. Limites connues & pistes d'amélioration
 
-- **Pas d'analyse de sentiment.** VADER figurait dans une version antérieure mais n'était jamais appliqué (import mort, aucune table Gold). Retiré plutôt que laissé à moitié fait. Un modèle transformer (FinBERT) sur `gold.news_headlines` serait le bon ajout en v2.
+- **Sentiment : VADER, pas un transformer.** VADER est lexical, donc rapide et sans GPU, mais il ignore la négation complexe et le jargon financier (« beat estimates » n'est pas positif pour lui). Suffisant pour classer une tonalité de titre, insuffisant pour un signal de trading. FinBERT sur `gold.news_headlines` serait la suite logique.
+- **Corrélation news/prix : descriptive, pas causale.** `gold.news_sentiment_daily` joint la tonalité du jour au rendement, et le graphe du symbole compare la tonalité au rendement du *lendemain* (une news publiée après un mouvement ne peut pas l'avoir causé). Le r de Pearson affiché reste une corrélation sur un échantillon court.
 - **Ingestion HDFS via le conteneur namenode.** WebHDFS redirige les écritures vers le hostname interne du datanode, injoignable depuis l'hôte. `scripts/upload_to_hdfs.py` tente WebHDFS puis bascule sur `docker compose cp` + `hdfs dfs -put`. Une vraie correction demanderait de publier les ports datanode et de réécrire le hostname annoncé.
-- **`datasketch` installé à chaud dans les conteneurs Spark.** Ça marche et c'est réappliqué par `make transform`, mais une image Spark dédiée serait plus propre.
+- **Couverture intraday partielle.** Les barres sous-journalières ne sont ingérées que pour les tickers listés dans `INTRADAY_TICKERS` (10 par défaut), et Yahoo plafonne l'historique par intervalle (1m ≈ 7 j, 5m/15m ≈ 60 j, 1h ≈ 730 j). Les timeframes indisponibles pour un symbole sont **désactivées dans l'UI** plutôt que silencieusement vides. Étendre = allonger la liste, au prix du temps d'ingestion (~1 requête par ticker et par intervalle).
 - **Dedup approximative côté driver.** MinHash/LSH tourne sur le driver via `toLocalIterator()`. Correct au volume traité (~92k headlines), à repenser si le corpus grossit d'un ordre de grandeur.
 - **1 worker Spark par défaut.** La scalabilité est démontrée par `--scale` mais pas stress-testée.
 - **Smoke tests uniquement.** pytest couvre la normalisation, les clés de dedup et les formes de KPIs — pas de tests de propriétés ni d'intégration bout-en-bout automatisée.

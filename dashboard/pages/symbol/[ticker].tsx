@@ -1,18 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { ArrowLeft, ExternalLink, FileText, Newspaper } from "lucide-react";
+import { ArrowLeft, FileText, Loader2, Newspaper } from "lucide-react";
 
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { AppShell } from "@/components/app-shell";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { PriceChart } from "@/components/viz/price-chart";
-import { fadeInUp } from "@/lib/animations";
-import { formatRelative } from "@/lib/time";
+import { TradingChart } from "@/components/viz/trading-chart";
+import { SentimentImpact } from "@/components/viz/sentiment-impact";
+import { NewsPanel, type Headline } from "@/components/news-panel";
+import { fadeInUp, stagger } from "@/lib/animations";
 import { cn } from "@/lib/utils";
 
 interface OhlcvRow {
@@ -25,17 +27,19 @@ interface OhlcvRow {
   source: string;
 }
 
-interface Headline {
+interface SentimentPoint {
   date: string;
-  ticker: string;
-  headline: string;
-  source: string;
+  avg_sentiment: number | null;
+  headline_count: number;
+  return_pct: number | null;
 }
 
 interface SymbolData {
   ticker: string;
   ohlcv: OhlcvRow[];
   headlines: Headline[];
+  sentiment: SentimentPoint[];
+  intervals: string[];
 }
 
 export default function SymbolPage() {
@@ -47,214 +51,243 @@ export default function SymbolPage() {
 
   useEffect(() => {
     if (!ticker) return;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetch(`/api/symbol/${ticker}`)
+    fetch(`/api/symbol/${ticker}`, { signal: controller.signal })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((j) => setData(j))
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+      .then(setData)
+      .catch((e) => {
+        if (!controller.signal.aborted) setError(String(e));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [ticker]);
+
+  const stats = useMemo(() => {
+    if (!data || data.ohlcv.length === 0) return null;
+    const first = data.ohlcv[0];
+    const last = data.ohlcv[data.ohlcv.length - 1];
+    const scored = data.headlines.filter((h) => h.sentiment != null);
+    const avgSentiment = scored.length
+      ? scored.reduce((s, h) => s + (h.sentiment ?? 0), 0) / scored.length
+      : null;
+    return {
+      last: last.close,
+      totalReturn: ((last.close - first.close) / first.close) * 100,
+      days: data.ohlcv.length,
+      news: data.headlines.length,
+      avgSentiment,
+      from: first.date,
+      to: last.date,
+      sources: Array.from(new Set(data.ohlcv.map((o) => o.source))),
+    };
+  }, [data]);
+
+  const title = typeof ticker === "string" ? ticker.toUpperCase() : "Symbol";
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-muted-foreground">
-        Loading {String(ticker)}...
-      </div>
-    );
-  }
-
-  if (error || !data) {
-    return (
-      <div className="min-h-screen p-8">
-        <Head><title>{String(ticker)} - BigData Pipeline</title></Head>
-        <div className="max-w-2xl mx-auto">
-          <Link href="/analysis">
-            <Button variant="ghost" size="sm">
-              <ArrowLeft className="h-4 w-4 mr-2" /> Back to Analysis
-            </Button>
-          </Link>
-          <Card className="mt-4">
-            <CardContent className="py-12 text-center">
-              <p className="text-destructive">{error ?? "Symbol not found"}</p>
-              <p className="text-sm text-muted-foreground mt-2">
-                {String(ticker)} may not have been ingested. Run the bulk loader to add it.
-              </p>
-            </CardContent>
-          </Card>
+      <AppShell active="analysis" title={title} subtitle="Loading symbol…">
+        <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Reading the warehouse…
         </div>
-      </div>
+      </AppShell>
     );
   }
 
-  const last = data.ohlcv[data.ohlcv.length - 1];
-  const first = data.ohlcv[0];
-  const totalReturn = last && first ? ((last.close - first.close) / first.close) * 100 : 0;
-
-  // Sources attribution: distinct sources used in the OHLCV data
-  const sources = Array.from(new Set(data.ohlcv.map((o) => o.source)));
+  if (error || !data || data.ohlcv.length === 0) {
+    return (
+      <AppShell active="analysis" title={title} subtitle="Symbol detail">
+        <Card className="max-w-2xl">
+          <CardContent className="py-12 text-center">
+            <p className="text-destructive">{error ?? "No price rows for this symbol."}</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {title} may not have been ingested. Run the bulk loader to add it.
+            </p>
+            <Link href="/analysis" className="mt-4 inline-block">
+              <Button variant="outline" size="sm">
+                <ArrowLeft className="mr-2 h-4 w-4" /> Back to analysis
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      </AppShell>
+    );
+  }
 
   return (
     <>
       <Head>
-        <title>{data.ticker} - BigData Pipeline</title>
+        <title>{data.ticker} — BigData Pipeline</title>
       </Head>
-      <main className="min-h-screen bg-background text-foreground">
-        <div className="max-w-7xl mx-auto p-8 space-y-6">
-          <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
-            <Link href="/analysis">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="h-4 w-4 mr-2" /> Back to Analysis
-              </Button>
-            </Link>
-          </motion.div>
-
-          <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
-            <div className="flex items-start justify-between flex-wrap gap-4">
-              <div>
-                <h1 className="text-4xl font-bold tracking-tight">{data.ticker}</h1>
-                <p className="text-sm text-muted-foreground mt-1">
-                  {first && last ? `${first.date} to ${last.date} - ${data.ohlcv.length} trading days` : "No data"}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {sources.map((s) => (
-                  <Badge key={s} variant="secondary" className="font-mono text-xs">
-                    {s}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Stats row */}
-          <motion.div
-            initial="hidden"
-            animate="visible"
+      <AppShell
+        active="analysis"
+        title={data.ticker}
+        subtitle={stats ? `${stats.from} → ${stats.to} · ${stats.days.toLocaleString()} trading days` : undefined}
+        actions={
+          <Link href="/analysis">
+            <Button variant="outline" size="sm">
+              <ArrowLeft className="mr-2 h-3.5 w-3.5" /> Analysis
+            </Button>
+          </Link>
+        }
+      >
+        <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-4">
+          {/* Bento row: stats tiles */}
+          <motion.section
             variants={fadeInUp}
-            className="grid grid-cols-2 md:grid-cols-4 gap-3"
+            className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"
           >
-            <div className="rounded-lg border bg-card/40 backdrop-blur-sm p-4">
-              <div className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
-                Latest Close
-              </div>
-              <div className="text-2xl font-bold font-mono mt-1">
-                {last?.close.toFixed(2) ?? "-"}
-              </div>
-            </div>
-            <div className="rounded-lg border bg-card/40 backdrop-blur-sm p-4">
-              <div className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
-                Total Return
-              </div>
-              <div className={cn(
-                "text-2xl font-bold font-mono mt-1",
-                totalReturn >= 0 ? "text-emerald-500" : "text-red-500"
-              )}>
-                {totalReturn >= 0 ? "+" : ""}{totalReturn.toFixed(2)}%
-              </div>
-            </div>
-            <div className="rounded-lg border bg-card/40 backdrop-blur-sm p-4">
-              <div className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
-                Days Tracked
-              </div>
-              <div className="text-2xl font-bold font-mono mt-1">
-                {data.ohlcv.length.toLocaleString()}
-              </div>
-            </div>
-            <div className="rounded-lg border bg-card/40 backdrop-blur-sm p-4">
-              <div className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
-                News Headlines
-              </div>
-              <div className="text-2xl font-bold font-mono mt-1">
-                {data.headlines.length.toLocaleString()}
-              </div>
-            </div>
-          </motion.div>
+            <Stat label="Latest close" value={stats!.last.toFixed(2)} mono />
+            <Stat
+              label="Total return"
+              value={`${stats!.totalReturn >= 0 ? "+" : ""}${stats!.totalReturn.toFixed(2)}%`}
+              tone={stats!.totalReturn >= 0 ? "up" : "down"}
+              mono
+            />
+            <Stat label="Trading days" value={stats!.days.toLocaleString()} mono />
+            <Stat label="Headlines" value={stats!.news.toLocaleString()} mono />
+            <Stat
+              label="Avg sentiment"
+              value={stats!.avgSentiment == null ? "—" : stats!.avgSentiment.toFixed(3)}
+              tone={
+                stats!.avgSentiment == null
+                  ? undefined
+                  : stats!.avgSentiment > 0.15
+                    ? "up"
+                    : stats!.avgSentiment < -0.15
+                      ? "down"
+                      : undefined
+              }
+              mono
+            />
+          </motion.section>
 
-          {/* Price chart */}
-          <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  Price (OHLCV)
-                  <Badge variant="secondary" className="text-xs">TradingView Lightweight Charts</Badge>
+          {/* Bento: chart spans 2/3, news rail 1/3 */}
+          <motion.section variants={fadeInUp} className="grid gap-4 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
+              <CardHeader className="pb-3">
+                <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+                  Price &amp; volume
+                  <Badge variant="secondary" className="text-[10px]">
+                    TradingView Lightweight Charts
+                  </Badge>
+                  {stats!.sources.map((s) => (
+                    <Badge key={s} variant="outline" className="font-mono text-[10px]">
+                      {s}
+                    </Badge>
+                  ))}
                 </CardTitle>
                 <CardDescription>
-                  Daily open / high / low / close. Source: {sources.join(", ")}.
+                  Daily OHLCV from the Gold layer. Dots above the bars mark days with news, coloured by tone.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <PriceChart data={data.ohlcv} />
+                <TradingChart
+                  ticker={data.ticker}
+                  availableIntervals={data.intervals ?? []}
+                  data={data.ohlcv}
+                  news={data.headlines.map((h) => ({
+                    date: h.date,
+                    headline: h.headline,
+                    sentiment: h.sentiment,
+                  }))}
+                  height={440}
+                />
               </CardContent>
             </Card>
-          </motion.div>
 
-          {/* News headlines */}
-          <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Newspaper className="h-4 w-4" /> Recent news headlines
+            <Card className="xl:col-span-1">
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Newspaper className="h-4 w-4" /> News
                 </CardTitle>
+                <CardDescription>Filter by tone, text, or date.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <NewsPanel headlines={data.headlines} maxHeight={430} />
+              </CardContent>
+            </Card>
+          </motion.section>
+
+          {/* Bento: sentiment impact + provenance */}
+          <motion.section variants={fadeInUp} className="grid gap-4 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Does the news move the price?</CardTitle>
                 <CardDescription>
-                  {data.headlines.length} headlines embedded in the source dataset.
-                  Only available for crypto tickers (CryptoDataDownload bundles news with OHLCV).
+                  Each bubble is one day: news tone against the <em>next</em> day&rsquo;s return.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {data.headlines.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No news headlines in the source dataset for this ticker.
-                  </p>
-                ) : (
-                  <ul className="space-y-2 max-h-[500px] overflow-y-auto">
-                    {data.headlines.map((h, i) => (
-                      <li key={i} className="border-l-2 border-muted pl-3 py-1">
-                        <div className="text-xs text-muted-foreground">
-                          {h.date} - {h.source}
-                        </div>
-                        <div className="text-sm">{h.headline}</div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <SentimentImpact data={data.sentiment ?? []} />
               </CardContent>
             </Card>
-          </motion.div>
 
-          {/* Source attribution */}
-          <motion.div initial="hidden" animate="visible" variants={fadeInUp}>
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <FileText className="h-4 w-4" /> Source attribution
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <FileText className="h-4 w-4" /> Provenance
                 </CardTitle>
-                <CardDescription>Where this data came from.</CardDescription>
+                <CardDescription>Where this symbol&rsquo;s data came from.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
-                <p>
-                  OHLCV source: <code className="font-mono text-xs">{sources[0]}</code> (CryptoDataDownload archive)
-                </p>
-                <p>
-                  News headlines: embedded in the same CryptoDataDownload CSV (column <code className="font-mono text-xs">articles</code>).
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Scope: every ticker present in the ingested archives. Restrict a run by passing
-                  a <code className="font-mono text-xs">--tickers-file</code> (one symbol per line)
-                  to <code className="font-mono text-xs">scripts/fetch_stocks.py</code>.
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  What's NOT included: fundamentals (P/E, EPS), real-time prices, analyst ratings, SEC filings.
-                  We don't have a paid data feed.
+                <Row label="OHLCV source" value={stats!.sources.join(", ")} />
+                <Row label="Coverage" value={`${stats!.from} → ${stats!.to}`} />
+                <Row label="News feeds" value="Yahoo Finance RSS, CoinDesk, CoinTelegraph, Nasdaq" />
+                <Row label="Sentiment" value="VADER compound, computed in the Gold job" />
+                <p className="pt-2 text-xs text-muted-foreground">
+                  Not included: fundamentals (P/E, EPS), intraday prices, analyst ratings, SEC filings.
+                  This is an exploratory view of the ingested dataset, not investment advice.
                 </p>
               </CardContent>
             </Card>
-          </motion.div>
-        </div>
-      </main>
+          </motion.section>
+        </motion.div>
+      </AppShell>
     </>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+  mono,
+}: {
+  label: string;
+  value: string;
+  tone?: "up" | "down";
+  mono?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div
+        className={cn(
+          "mt-1 text-2xl font-bold",
+          mono && "font-mono tabular-nums",
+          tone === "up" && "text-emerald-500",
+          tone === "down" && "text-red-500",
+        )}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
+      <span className="text-right font-mono text-xs">{value}</span>
+    </div>
   );
 }

@@ -267,8 +267,8 @@ export default function AnalysisPage() {
               {compare && selected.length >= 2 && (
                 <>
                   {/* Row 1: histogram + ridgeline */}
-                  <motion.div variants={fadeInUp} className="grid gap-6 lg:grid-cols-2">
-                    <Card>
+                  <motion.div variants={fadeInUp} className="grid gap-4 lg:grid-cols-5">
+                    <Card className="lg:col-span-3">
                       <CardHeader>
                         <CardTitle className="text-base">Returns distribution</CardTitle>
                         <CardDescription>Histogram of daily returns per ticker.</CardDescription>
@@ -277,7 +277,7 @@ export default function AnalysisPage() {
                         <HistogramChart data={histogramData} width={500} height={260} />
                       </CardContent>
                     </Card>
-                    <Card>
+                    <Card className="lg:col-span-2">
                       <CardHeader>
                         <CardTitle className="text-base">Returns density (ridgeline)</CardTitle>
                         <CardDescription>Distribution shape per ticker.</CardDescription>
@@ -289,8 +289,8 @@ export default function AnalysisPage() {
                   </motion.div>
 
                   {/* Row 2: chord + radar */}
-                  <motion.div variants={fadeInUp} className="grid gap-6 lg:grid-cols-2">
-                    <Card>
+                  <motion.div variants={fadeInUp} className="grid gap-4 lg:grid-cols-5">
+                    <Card className="lg:col-span-2">
                       <CardHeader>
                         <CardTitle className="text-base">Co-movement (chord)</CardTitle>
                         <CardDescription>
@@ -301,7 +301,7 @@ export default function AnalysisPage() {
                         <ChordDiagram matrix={compare.correlation.matrix} tickers={compare.correlation.tickers} />
                       </CardContent>
                     </Card>
-                    <Card>
+                    <Card className="lg:col-span-3">
                       <CardHeader>
                         <CardTitle className="text-base">Multi-metric radar</CardTitle>
                         <CardDescription>

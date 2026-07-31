@@ -65,6 +65,19 @@ export interface Headline {
   ticker: string;
   headline: string;
   source: string;
+  url: string | null;
+  sentiment: number | null;
+  sentiment_label: string | null;
+}
+
+export interface SentimentPoint {
+  date: string;
+  ticker: string;
+  avg_sentiment: number | null;
+  headline_count: number;
+  positive_count: number;
+  negative_count: number;
+  return_pct: number | null;
 }
 
 export interface TickerSummary {
@@ -169,24 +182,136 @@ export async function getOhlcv(ticker: string, limit = 1000): Promise<OhlcvRow[]
  * datanode's container hostname, which does not resolve from the host, so the
  * previous Bronze-JSONL path always came back empty.
  */
-export async function getHeadlines(ticker: string, limit = 50): Promise<Headline[]> {
+export async function getHeadlines(
+  ticker: string,
+  limit = 50,
+  range?: { from?: string; to?: string },
+): Promise<Headline[]> {
   try {
+    const params: unknown[] = [ticker.toUpperCase()];
+    let where = "WHERE ticker = $1";
+    if (range?.from) {
+      params.push(range.from);
+      where += ` AND date >= $${params.length}`;
+    }
+    if (range?.to) {
+      params.push(range.to);
+      where += ` AND date <= $${params.length}`;
+    }
+    params.push(Math.max(1, Math.min(500, limit)));
+
     const result = await pool.query(
-      `SELECT date::text, ticker, headline, source
+      `SELECT date::text, ticker, headline, url, source, sentiment, sentiment_label
        FROM gold.news_headlines
-       WHERE ticker = $1
+       ${where}
        ORDER BY date DESC
-       LIMIT $2`,
-      [ticker.toUpperCase(), limit]
+       LIMIT $${params.length}`,
+      params,
     );
     return result.rows.map((r) => ({
       date: r.date,
       ticker: r.ticker,
       headline: r.headline ?? "",
       source: r.source ?? "",
+      url: r.url ?? null,
+      sentiment: r.sentiment != null ? parseFloat(r.sentiment) : null,
+      sentiment_label: r.sentiment_label ?? null,
     }));
   } catch (err) {
     console.error(`getHeadlines(${ticker}) error:`, err);
+    return [];
+  }
+}
+
+/** Intervals the warehouse can serve, and how far back each reaches. */
+export const INTRADAY_INTERVALS = ["1m", "5m", "15m", "1h"] as const;
+export type Interval = (typeof INTRADAY_INTERVALS)[number] | "1d";
+
+export interface Bar {
+  ts: string;
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+}
+
+/**
+ * Sub-daily bars for one ticker and interval.
+ *
+ * Returns [] when that interval was never ingested for the symbol, which the
+ * caller should treat as "offer the daily series instead" rather than an error.
+ */
+export async function getIntraday(ticker: string, interval: string, limit = 5000): Promise<Bar[]> {
+  if (!(INTRADAY_INTERVALS as readonly string[]).includes(interval)) return [];
+  try {
+    const result = await pool.query(
+      `SELECT ts, date::text, open, high, low, close, volume
+       FROM gold.intraday_prices
+       WHERE ticker = $1 AND interval = $2
+       ORDER BY ts DESC
+       LIMIT $3`,
+      [ticker.toUpperCase(), interval, Math.max(1, Math.min(20000, limit))],
+    );
+    return result.rows
+      .map((r) => ({
+        ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+        date: r.date,
+        open: parseFloat(r.open),
+        high: parseFloat(r.high),
+        low: parseFloat(r.low),
+        close: parseFloat(r.close),
+        volume: r.volume != null ? parseInt(r.volume, 10) : null,
+      }))
+      .reverse();
+  } catch (err) {
+    console.error(`getIntraday(${ticker}, ${interval}) error:`, err);
+    return [];
+  }
+}
+
+/** Which intervals actually have bars for a ticker — drives the chart's controls. */
+export async function getAvailableIntervals(ticker: string): Promise<string[]> {
+  try {
+    const result = await pool.query(
+      `SELECT interval, COUNT(*)::int AS n
+       FROM gold.intraday_prices WHERE ticker = $1
+       GROUP BY interval HAVING COUNT(*) > 1`,
+      [ticker.toUpperCase()],
+    );
+    const present = new Set(result.rows.map((r) => r.interval));
+    return INTRADAY_INTERVALS.filter((i) => present.has(i));
+  } catch {
+    return [];
+  }
+}
+
+/** Daily news tone for a ticker, alongside that day's return. */
+export async function getSentimentSeries(ticker: string, days = 365): Promise<SentimentPoint[]> {
+  try {
+    const result = await pool.query(
+      `SELECT date::text, ticker, avg_sentiment, headline_count,
+              positive_count, negative_count, return_pct
+       FROM gold.news_sentiment_daily
+       WHERE ticker = $1
+       ORDER BY date DESC
+       LIMIT $2`,
+      [ticker.toUpperCase(), Math.max(1, Math.min(2000, days))],
+    );
+    return result.rows
+      .map((r) => ({
+        date: r.date,
+        ticker: r.ticker,
+        avg_sentiment: r.avg_sentiment != null ? parseFloat(r.avg_sentiment) : null,
+        headline_count: r.headline_count ?? 0,
+        positive_count: r.positive_count ?? 0,
+        negative_count: r.negative_count ?? 0,
+        return_pct: r.return_pct != null ? parseFloat(r.return_pct) : null,
+      }))
+      .reverse();
+  } catch (err) {
+    console.error(`getSentimentSeries(${ticker}) error:`, err);
     return [];
   }
 }
@@ -290,6 +415,7 @@ export const GOLD_TABLES = [
   { name: "rolling_volatility_7d", label: "Volatility 7d", description: "Rolling 7-day stddev of returns", order: "date DESC, ticker" },
   { name: "news_volume_per_coin", label: "News volume", description: "Headline count per (date, ticker)", order: "date DESC, ticker" },
   { name: "news_headlines", label: "News headlines", description: "Headline text served to the UI", order: "date DESC, ticker" },
+  { name: "news_sentiment_daily", label: "News sentiment", description: "Daily news tone vs that day's return", order: "date DESC, ticker" },
   { name: "silver_sample", label: "Silver sample", description: "Materialised slice of the Silver layer", order: "source_type, date DESC" },
 ] as const;
 
@@ -311,22 +437,33 @@ export async function getTablePage(
   limit = 50,
   offset = 0,
   filter?: { column: string; value: string },
+  range?: { from?: string; to?: string },
 ): Promise<TablePage> {
   const spec = GOLD_TABLES.find((t) => t.name === table)!;
   const safeLimit = Math.max(1, Math.min(500, limit));
   const safeOffset = Math.max(0, offset);
 
   // `table` and `order` come from the constant above, never from the request.
-  // Only the filter *value* is user input, and it goes through a bound param.
-  let where = "";
+  // Only filter values are user input, and they all go through bound params.
+  const columns = await getTableColumns(table);
+  const clauses: string[] = [];
   const params: unknown[] = [];
-  if (filter?.value) {
-    const columns = await getTableColumns(table);
-    if (columns.includes(filter.column)) {
-      params.push(`%${filter.value}%`);
-      where = `WHERE ${filter.column}::text ILIKE $${params.length}`;
+
+  if (filter?.value && columns.includes(filter.column)) {
+    params.push(`%${filter.value}%`);
+    clauses.push(`${filter.column}::text ILIKE $${params.length}`);
+  }
+  if (columns.includes("date")) {
+    if (isIsoDate(range?.from)) {
+      params.push(range!.from);
+      clauses.push(`date >= $${params.length}::date`);
+    }
+    if (isIsoDate(range?.to)) {
+      params.push(range!.to);
+      clauses.push(`date <= $${params.length}::date`);
     }
   }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
   const totalResult = await pool.query(`SELECT COUNT(*)::int AS n FROM gold.${table} ${where}`, params);
   const rowsResult = await pool.query(
@@ -339,6 +476,11 @@ export async function getTablePage(
     rows: rowsResult.rows,
     total: totalResult.rows[0]?.n ?? 0,
   };
+}
+
+/** Guard date params so only a literal YYYY-MM-DD ever reaches a cast. */
+function isIsoDate(value: string | undefined): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
 async function getTableColumns(table: GoldTableName): Promise<string[]> {

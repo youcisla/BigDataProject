@@ -91,10 +91,13 @@ CREATE TABLE gold.news_volume_per_coin_default PARTITION OF gold.news_volume_per
 -- ============================================================================
 DROP TABLE IF EXISTS gold.news_headlines CASCADE;
 CREATE TABLE gold.news_headlines (
-    date        DATE    NOT NULL,
-    ticker      TEXT    NOT NULL,
-    headline    TEXT    NOT NULL,
-    source      TEXT,
+    date            DATE    NOT NULL,
+    ticker          TEXT    NOT NULL,
+    headline        TEXT    NOT NULL,
+    url             TEXT,
+    source          TEXT,
+    sentiment       NUMERIC(6,4),
+    sentiment_label TEXT,
     updated_at  TIMESTAMP NOT NULL DEFAULT now()
 ) PARTITION BY RANGE (date);
 
@@ -130,3 +133,47 @@ CREATE INDEX IF NOT EXISTS idx_daily_returns_ticker ON gold.daily_returns(ticker
 CREATE INDEX IF NOT EXISTS idx_top_movers_date ON gold.top_movers(date);
 CREATE INDEX IF NOT EXISTS idx_volatility_date ON gold.rolling_volatility_7d(date);
 CREATE INDEX IF NOT EXISTS idx_news_volume_date ON gold.news_volume_per_coin(date);
+
+
+-- ============================================================================
+-- news_sentiment_daily : daily news tone per ticker, joined to that day's
+-- return. One row per (date, ticker) so SQL can correlate tone with price.
+-- ============================================================================
+DROP TABLE IF EXISTS gold.news_sentiment_daily CASCADE;
+CREATE TABLE gold.news_sentiment_daily (
+    date           DATE    NOT NULL,
+    ticker         TEXT    NOT NULL,
+    avg_sentiment  NUMERIC(6,4),
+    headline_count INTEGER NOT NULL,
+    positive_count INTEGER,
+    negative_count INTEGER,
+    return_pct     NUMERIC(12,6),
+    updated_at     TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (date, ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_sentiment_ticker ON gold.news_sentiment_daily(ticker, date DESC);
+
+
+-- ============================================================================
+-- intraday_prices : sub-daily OHLCV bars, so the chart can offer 1m..1h
+-- timeframes. The Kaggle archive is daily-only; these come from the Yahoo
+-- chart API. Not partitioned: the window is short by construction (Yahoo caps
+-- 1m at 7 days, 5m/15m at 60, 1h at 730).
+-- ============================================================================
+DROP TABLE IF EXISTS gold.intraday_prices CASCADE;
+CREATE TABLE gold.intraday_prices (
+    ticker     TEXT        NOT NULL,
+    ts         TIMESTAMPTZ NOT NULL,
+    interval   TEXT        NOT NULL,
+    date       DATE,
+    open       NUMERIC(18,8),
+    high       NUMERIC(18,8),
+    low        NUMERIC(18,8),
+    close      NUMERIC(18,8) NOT NULL,
+    volume     BIGINT,
+    updated_at TIMESTAMP   NOT NULL DEFAULT now(),
+    PRIMARY KEY (ticker, ts, interval)
+);
+
+CREATE INDEX IF NOT EXISTS idx_intraday_lookup ON gold.intraday_prices(ticker, interval, ts DESC);

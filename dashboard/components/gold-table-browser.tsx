@@ -22,6 +22,9 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
   const [applied, setApplied] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [appliedRange, setAppliedRange] = useState<{ from: string; to: string }>({ from: "", to: "" });
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [total, setTotal] = useState(0);
@@ -43,6 +46,8 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
       params.set("column", filterColumn);
       params.set("q", applied);
     }
+    if (appliedRange.from) params.set("from", appliedRange.from);
+    if (appliedRange.to) params.set("to", appliedRange.to);
     fetch(`/api/table?${params}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((j) => {
@@ -62,7 +67,7 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [selected, page, applied]);
+  }, [selected, page, applied, appliedRange]);
 
   useEffect(() => load(), [load]);
 
@@ -71,18 +76,22 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
     setPage(0);
     setQuery("");
     setApplied("");
+    setFrom("");
+    setTo("");
+    setAppliedRange({ from: "", to: "" });
   };
 
   const submitSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(0);
     setApplied(query.trim());
+    setAppliedRange({ from, to });
   };
 
   const spec = tables.find((t) => t.name === selected);
   const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
-  const from = total === 0 ? 0 : page * PAGE_SIZE + 1;
-  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  const rowFrom = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const rowTo = Math.min(total, (page + 1) * PAGE_SIZE);
 
   return (
     <div className="space-y-4">
@@ -121,7 +130,37 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
               className="w-48 rounded-md border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </div>
-          <Button type="submit" variant="outline" size="sm">Search</Button>
+          <div className="flex items-center gap-1">
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              aria-label="From date"
+              className="rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              aria-label="To date"
+              className="rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+          <Button type="submit" variant="outline" size="sm">Apply</Button>
+          {(applied || appliedRange.from || appliedRange.to) && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setQuery(""); setFrom(""); setTo("");
+                setApplied(""); setAppliedRange({ from: "", to: "" }); setPage(0);
+              }}
+            >
+              Clear
+            </Button>
+          )}
         </form>
       </div>
 
@@ -141,7 +180,7 @@ export function GoldTableBrowser({ tables }: { tables: TableSpec[] }) {
 
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span className="font-mono tabular-nums">
-          {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()} rows
+          {rowFrom.toLocaleString()}–{rowTo.toLocaleString()} of {total.toLocaleString()} rows
         </span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0}>

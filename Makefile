@@ -1,5 +1,5 @@
-.PHONY: help up init-hdfs down reset logs ps status \
-        bulk crypto crypto-live spark-deps transform load demo monitor test clean ui
+.PHONY: help build up init-hdfs down reset logs ps status \
+        bulk crypto crypto-live news intraday ingest transform load demo monitor test lint clean ui
 
 COMPOSE = docker compose
 SPARK_SERVICE = spark-master
@@ -8,33 +8,41 @@ help:
 	@echo "BigDataProject Makefile"
 	@echo ""
 	@echo "Cluster:"
+	@echo "  make build           Build the Spark image (datasketch, VADER, JDBC driver)"
 	@echo "  make up              Start all services (background)"
 	@echo "  make down            Stop services, keep volumes"
 	@echo "  make reset           Stop services, drop volumes (full clean)"
 	@echo "  make logs            Tail all service logs"
-	@echo "  make ps              Show service status"
-	@echo "  make status          Same as ps"
+	@echo "  make ps / status     Show service status"
 	@echo ""
-	@echo "Data:"
-	@echo "  make init-hdfs       Create /data/{bronze,silver,gold} directories on HDFS"
-	@echo "  make bulk            Stocks + ETF OHLCV archives -> HDFS Bronze"
-	@echo "  make crypto          Crypto OHLCV + news headlines -> HDFS Bronze"
-	@echo "  make crypto-live     CoinGecko live API OHLC -> HDFS Bronze (cron-friendly)"
-	@echo "  make transform       Silver: HDFS Bronze JSON -> HDFS Silver Parquet"
-	@echo "  make load            Gold: HDFS Silver -> Postgres KPIs"
-	@echo "  make demo            up + init-hdfs + bulk + crypto + crypto-live + transform + load"
+	@echo "Ingestion (Bronze):"
+	@echo "  make init-hdfs       Create /data/{bronze,silver,gold} on HDFS"
+	@echo "  make bulk            Stocks + ETF OHLCV archives      (~16.5M records)"
+	@echo "  make crypto          Crypto OHLCV + bundled headlines (archive)"
+	@echo "  make crypto-live     CoinGecko live OHLC              (free API, cron-friendly)"
+	@echo "  make news            Financial news RSS + sentiment   (free feeds, cron-friendly)"
+	@echo "  make intraday        Sub-daily bars 1m/5m/15m/1h      (Yahoo chart API)"
+	@echo "  make ingest          All five Bronze sources"
+	@echo ""
+	@echo "Pipeline:"
+	@echo "  make transform       Silver: Bronze JSON -> Parquet (dedup + schema)"
+	@echo "  make load            Gold: Silver -> Postgres KPIs (+ VADER sentiment)"
+	@echo "  make demo            up + init-hdfs + ingest + transform + load"
 	@echo ""
 	@echo "Monitoring:"
 	@echo "  make monitor         Print Grafana + Prometheus URLs"
 	@echo ""
-	@echo "Tests:"
-	@echo "  make test            Run pytest smoke tests"
-	@echo ""
-	@echo "Maintenance:"
-	@echo "  make clean           Same as reset"
+	@echo "Quality:"
+	@echo "  make test            pytest smoke tests (Bronze/Silver/Gold)"
+	@echo "  make lint            TypeScript typecheck for the dashboard"
 	@echo ""
 	@echo "Dashboard:"
-	@echo "  make ui              Start Next.js dashboard on http://localhost:3001"
+	@echo "  make ui              Next.js dashboard on http://localhost:3001"
+
+# ---------------------------------------------------------------- cluster ---
+
+build:
+	$(COMPOSE) build spark-master spark-worker
 
 up:
 	$(COMPOSE) up -d
@@ -57,6 +65,8 @@ init-hdfs:
 	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/crypto_bulk
 	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/crypto_live
 	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/crypto_news
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/news_rss
+	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/bronze/intraday
 	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/silver
 	$(COMPOSE) exec -T namenode hdfs dfs -mkdir -p /data/gold
 	@# Bronze is written as root (via the namenode container) but Spark runs as
@@ -65,10 +75,15 @@ init-hdfs:
 	$(COMPOSE) exec -T namenode hdfs dfs -chmod -R 777 /data
 	@echo "Done."
 
+# -------------------------------------------------------------- ingestion ---
+
 # STOCKS_DIR / ETFS_DIR hold the *.us.txt OHLCV files from the Kaggle archive.
 STOCKS_DIR ?= data/Stocks
 ETFS_DIR   ?= data/ETFs
 CRYPTO_DIR ?= data
+LIVE_DAYS  ?= 90
+# How many of the best-covered Gold tickers get a per-symbol news feed.
+NEWS_TICKERS ?= 40
 
 bulk:
 	@if [ ! -d "$(STOCKS_DIR)" ]; then \
@@ -86,56 +101,60 @@ crypto:
 crypto-live:
 	python scripts/fetch_crypto_live.py --days $(LIVE_DAYS)
 
-LIVE_DAYS ?= 90
+# Free financial news RSS (Yahoo Finance per symbol, CoinDesk, CoinTelegraph,
+# Nasdaq). No API key. Safe to run from cron — headlines dedup in Silver.
+news:
+	python scripts/fetch_news_rss.py --from-gold $(NEWS_TICKERS)
 
-# The apache/spark image ships no third-party Python packages, and the Silver
-# job needs datasketch for MinHash/LSH. Installed into the running containers
-# rather than baked into an image, so it must be re-applied after `make reset`.
-spark-deps:
-	@for svc in spark-master spark-worker; do \
-		$(COMPOSE) exec -T -u 0 $$svc pip install -q datasketch || exit 1; \
-	done
-	@echo "Spark Python deps installed."
+# Sub-daily bars. The Kaggle archive is daily-only, so the chart's 1m/5m/15m/1h
+# timeframes come from here. Yahoo caps history per interval: 1m ~7d, 5m/15m
+# ~60d, 1h ~730d — asking for more silently returns less.
+INTRADAY_TICKERS ?= BTC,ETH,AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,SOL,ADA
+INTRADAY_INTERVALS ?= 1m,5m,15m,1h
 
-transform: spark-deps
+intraday:
+	python scripts/fetch_intraday.py --tickers $(INTRADAY_TICKERS) --intervals $(INTRADAY_INTERVALS)
+
+ingest: bulk crypto crypto-live news intraday
+
+# --------------------------------------------------------------- pipeline ---
+
+transform:
 	$(COMPOSE) exec -T $(SPARK_SERVICE) \
 		/opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client \
 		/opt/spark/jobs/silver_transform.py --date $$(date -u +%Y-%m-%d)
 
-# The Gold job writes over JDBC. `--packages` needs Maven Central at runtime and
-# a writable Ivy cache, neither of which the apache/spark image reliably has, so
-# vendor the driver next to the jobs (jobs/ is already mounted into the cluster).
-PG_JAR = postgresql-42.7.3.jar
-PG_JAR_URL = https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/$(PG_JAR)
-
-jobs/$(PG_JAR):
-	@echo "Downloading $(PG_JAR)..."
-	curl -fsSL -o jobs/$(PG_JAR) $(PG_JAR_URL)
-
-load: jobs/$(PG_JAR)
+# datasketch, vaderSentiment, and the Postgres JDBC driver are baked into the
+# image by docker/spark/Dockerfile, so no --packages and no pip install here.
+load:
 	$(COMPOSE) exec -T $(SPARK_SERVICE) \
 		/opt/spark/bin/spark-submit --master spark://spark-master:7077 --deploy-mode client \
-		--jars /opt/spark/jobs/$(PG_JAR) \
-		--driver-class-path /opt/spark/jobs/$(PG_JAR) \
 		/opt/spark/jobs/gold_kpis.py
 
-demo: up init-hdfs bulk crypto crypto-live transform load
+demo: build up init-hdfs ingest transform load
 	@echo ""
 	@echo "=== Demo complete ==="
-	@echo "Grafana:    http://localhost:3000 (admin / admin)"
+	@echo "Dashboard:  http://localhost:3001   (make ui)"
+	@echo "Grafana:    http://localhost:3000   (admin / admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo "HDFS UI:    http://localhost:9870"
 	@echo "Spark UI:   http://localhost:8088"
 	@echo "cAdvisor:   http://localhost:8081"
 	@echo "Postgres:   localhost:5432 (gold / gold / gold)"
 
+# ------------------------------------------------------------------ misc ----
+
 monitor:
 	@echo "Grafana:    http://localhost:3000"
 	@echo "Prometheus: http://localhost:9090"
 	@echo "cAdvisor:   http://localhost:8081"
+	@echo "Pushgateway: http://localhost:9091"
 
 test:
 	pytest tests/ -v
+
+lint:
+	cd dashboard && npx tsc --noEmit
 
 clean: reset
 

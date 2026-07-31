@@ -193,12 +193,12 @@ export default function DataExplorer() {
             />
           </motion.section>
 
-          {/* Warehouse coverage */}
-          <motion.section variants={fadeInUp} className="grid gap-4 lg:grid-cols-3">
-            <Card className="lg:col-span-1">
+          {/* Bento: coverage tiles, source mix, and a Bronze source rail */}
+          <motion.section variants={fadeInUp} className="grid gap-4 lg:grid-cols-6">
+            <Card className="lg:col-span-2">
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Coverage</CardTitle>
-                <CardDescription>What the warehouse currently holds.</CardDescription>
+                <CardDescription>What the warehouse holds.</CardDescription>
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-3">
                 <Stat label="Tickers" value={overview?.tickers.toLocaleString() ?? "—"} />
@@ -207,7 +207,8 @@ export default function DataExplorer() {
                 <Stat label="To" value={overview?.lastDate ?? "—"} mono />
               </CardContent>
             </Card>
-            <Card className="lg:col-span-2">
+
+            <Card className="lg:col-span-4">
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Rows by source</CardTitle>
                 <CardDescription>Which ingested source each Gold price row came from.</CardDescription>

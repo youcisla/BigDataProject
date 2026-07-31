@@ -12,10 +12,14 @@ import hashlib
 # across stocks, crypto_live, and crypto_news.
 _FIELD_TYPES = {
     "source": "string",
-    "source_type": "string",       # stock_ohlcv | crypto_ohlcv | crypto_news
+    "source_type": "string",       # stock_ohlcv | crypto_ohlcv | crypto_news | news | intraday
     "external_id": "string",        # hashable dedup key
     "ticker": "string",              # AAPL | BTC | ETH (uppercased)
     "date": "string",                # YYYY-MM-DD
+    # Intraday bars only. Daily rows leave these null, which keeps one schema
+    # across every source instead of forking the Silver layer in two.
+    "ts": "string",                  # ISO-8601 UTC timestamp of the bar open
+    "interval": "string",            # 1m | 5m | 15m | 1h | 1d
     "open": "double",
     "high": "double",
     "low": "double",

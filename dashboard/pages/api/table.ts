@@ -13,6 +13,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const offset = Number(req.query.offset ?? 0);
   const column = typeof req.query.column === "string" ? req.query.column : "";
   const value = typeof req.query.q === "string" ? req.query.q : "";
+  const from = typeof req.query.from === "string" ? req.query.from : undefined;
+  const to = typeof req.query.to === "string" ? req.query.to : undefined;
 
   try {
     const page = await getTablePage(
@@ -20,6 +22,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       limit,
       offset,
       column && value ? { column, value } : undefined,
+      { from, to },
     );
     res.status(200).json({ table: name, ...page });
   } catch (err) {

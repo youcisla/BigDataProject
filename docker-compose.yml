@@ -50,7 +50,10 @@ services:
         condition: service_healthy
 
   spark-master:
-    image: apache/spark:3.5.1
+    build:
+      context: ./docker/spark
+      dockerfile: Dockerfile
+    image: bigdata/spark:3.5.1
     container_name: spark-master
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
     environment:
@@ -70,13 +73,18 @@ services:
       - bigdata-net
 
   spark-worker:
-    image: apache/spark:3.5.1
+    build:
+      context: ./docker/spark
+      dockerfile: Dockerfile
+    image: bigdata/spark:3.5.1
     container_name: spark-worker
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
     environment:
       - SPARK_DAEMON_MEMORY=1g
-      - SPARK_WORKER_MEMORY=1g
-      - SPARK_WORKER_CORES=2
+      # 16.5M Bronze records will not fit through a 1 GB / 2-core worker in any
+      # reasonable time. Tune down if Docker Desktop has less than 10 GB.
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-4g}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-4}
     # On a 16 GB laptop, uncomment:
     # mem_limit: 2g
     # mem_reservation: 1g
